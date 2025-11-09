@@ -1,12 +1,12 @@
-import asyncio
+import os
+from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from aiohttp import web
-import os
 
-from booking import router as booking_router
-from registration import router as registration_router
-from admin import router as admin_router
+from handlers.booking import router as booking_router
+from handlers.registration import router as registration_router
+from handlers.admin import router as admin_router
+
 
 # --- Токен и URL ---
 BOT_TOKEN = os.getenv("8300246721:AAHp6A7VIuqwmOfuHkDyLz5yek9FvIiIgbM")
