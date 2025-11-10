@@ -1,11 +1,13 @@
-import asyncio
+import asyncio, os
 from aiogram import Bot, Dispatcher
 
-from config import BOT_TOKEN, WASHING_MACHINES, DRYERS
+from config import WASHING_MACHINES, DRYERS
 from database import init_db, add_machine, get_machines_by_type
 from scheduler import setup_scheduler, schedule_reminder
 
 from handlers import registration, booking, admin
+
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 async def main():
     init_db()
@@ -20,17 +22,16 @@ async def main():
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
 
-    await bot.delete_webhook(drop_pending_updates=True)
-
     dp.include_router(registration.router)
     dp.include_router(booking.router)
     dp.include_router(admin.router)
 
-    scheduler = setup_scheduler()
+    await bot.delete_webhook(drop_pending_updates=True)
 
+    setup_scheduler()
     print("Бот запущен 🚀")
     try:
-        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
+        await dp.start_polling(bot)
     except KeyboardInterrupt:
         print("⛔️ Бот остановлен вручную.")
     finally:
