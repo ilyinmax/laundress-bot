@@ -1,16 +1,20 @@
-from aiogram import Router, types, F
+from aiogram import Router, types, F, Bot
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
-from database import *
-from datetime import datetime, timedelta
-from config import WASHING_MACHINES, DRYERS
-from keyboards import main_menu
-from scheduler import schedule_reminder
-from aiogram import Bot
-import sqlite3
 from aiogram.exceptions import TelegramBadRequest
+
 from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
-from config import WASHING_MACHINES, DRYERS, TIMEZONE
+
+from config import TIMEZONE
+from keyboards import main_menu
+from scheduler import schedule_reminder
+from database import (
+    get_conn,
+    get_user,
+    get_user_bookings_today,
+    get_free_hours,
+    create_booking,
+)
 
 TZ = ZoneInfo(TIMEZONE)
 
@@ -19,6 +23,7 @@ def now_local() -> datetime:
 
 router = Router()
 
+# -------- утилиты интерфейса --------
 def _norm_kb(kb: InlineKeyboardMarkup | None):
     if not kb:
         return None
@@ -41,15 +46,12 @@ async def safe_edit(msg: Message, *, text: str | None = None,
     new_kb = _norm_kb(reply_markup)
 
     try:
-        # меняем текст (и при необходимости клавиатуру)
         if text is not None and text != cur_text:
             return await msg.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
 
-        # текст тот же — меняем только клавиатуру, если она реально другая
         if new_kb is not None and new_kb != cur_kb:
             return await msg.edit_reply_markup(reply_markup=reply_markup)
 
-        # ничего не изменилось — ничего не делаем
         return None
 
     except TelegramBadRequest as e:
@@ -58,44 +60,33 @@ async def safe_edit(msg: Message, *, text: str | None = None,
             return None
         raise
 
+# =========================================================
+#        /book → Дата → Машина (все типы) → Время
+# =========================================================
 
-
-# === Команда бронирования ===
+# /book — сначала выбираем ДАТУ
 @router.message(F.text == "/book")
-async def choose_type(msg: types.Message):
+async def choose_date_first(msg: types.Message):
     user = get_user(msg.from_user.id)
     if not user:
         return await msg.answer("Сначала пройдите регистрацию с помощью /start")
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Стиральная машина", callback_data="type_wash")],
-        [InlineKeyboardButton(text="Сушилка", callback_data="type_dry")]
-    ])
-    await msg.answer("Выберите тип машины:", reply_markup=kb)
+    now = now_local()
+    today = now.date()
+    start_offset = 1 if now.hour >= 23 else 0  # после 23:00 убираем «сегодня»
 
-# === Выбор машины ===
-@router.callback_query(F.data.startswith("type_"))
-async def choose_machine(callback: types.CallbackQuery):
-    await callback.answer()  # быстрый ACK
-    try:
-        if callback.message:
-            await callback.message.edit_reply_markup(reply_markup=None)
-    except Exception:
-        pass
-    type_ = callback.data.split("_")[1]
-    machines = get_machines_by_type(type_)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=m[2], callback_data=f"machine_{m[0]}")] for m in machines
-    ])
-    # добавить кнопку "Назад к типам"
-    kb.inline_keyboard.append([InlineKeyboardButton(text="⬅️ К типам", callback_data="back_to_types")])
+    days_buttons = []
+    for i in range(start_offset, start_offset + 3):
+        d = today + timedelta(days=i)
+        d_str = d.strftime("%d.%m")
+        days_buttons.append([InlineKeyboardButton(text=f"📅 {d_str}", callback_data=f"date_{d.isoformat()}")])
 
-    await safe_edit(msg=callback.message, text="Выберите машину:", reply_markup=kb)
+    kb = InlineKeyboardMarkup(inline_keyboard=days_buttons)
+    await msg.answer("Выберите дату:", reply_markup=kb)
 
-
-# === Выбор дня ===
-@router.callback_query(F.data.startswith("machine_"))
-async def choose_day(callback: types.CallbackQuery, machine_id: int | None = None):
+# Выбрали дату → показываем ВСЕ машины (wash+dry) с подсчётом свободно/занято
+@router.callback_query(F.data.startswith("date_"))
+async def choose_machine_for_date(callback: types.CallbackQuery):
     await callback.answer()
     try:
         if callback.message:
@@ -103,77 +94,45 @@ async def choose_day(callback: types.CallbackQuery, machine_id: int | None = Non
     except Exception:
         pass
 
-    if not machine_id:
-        machine_id = int(callback.data.split("_")[1])
+    date = callback.data.split("_", 1)[1]
 
-    now = now_local()
-    today = now.date()
-
-    # если уже 23:00 или позже, убираем сегодняшний день
-    if now.hour >= 23:
-        start_offset = 1  # начинаем с завтрашнего дня
-    else:
-        start_offset = 0  # включаем сегодня
-
-    # получаем тип и имя машины (тип нужен для "назад к машинам")
+    # Берём все машины разом
     with get_conn() as conn:
-        cur = conn.execute("SELECT type, name FROM machines WHERE id=?", (machine_id,))
-        machine_type, machine_name = cur.fetchone()
+        cur = conn.execute("SELECT id, type, name FROM machines ORDER BY type, id")
+        machines = cur.fetchall()  # (id, 'wash'|'dry', name)
 
-    total_slots = 15  # 9:00–23:00
-    days_buttons = []
+    rows = []
+    for m in machines:
+        machine_id, machine_type, machine_name = m
+        free_hours = get_free_hours(machine_id, date)
+        free_cnt = len(free_hours)
+        busy_cnt = 15 - free_cnt  # 9..23 → 15 слотов
+        emoji = "🧺" if machine_type == "wash" else "🌬️"
+        label = f"{emoji} {machine_name} — свободно: {free_cnt} / занято: {busy_cnt}"
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"machine_{machine_id}_{date}")])
 
-    # создаём список кнопок на 3 дня вперёд (но пропускаем сегодня после 23:00)
-    for i in range(start_offset, start_offset + 3):
-        date = today + timedelta(days=i)
-        date_str = date.isoformat()
+    rows.append([InlineKeyboardButton(text="⬅️ К датам", callback_data="back_to_dates")])
 
-        # считаем количество занятых слотов
-        with get_conn() as conn:
-            cur = conn.execute(
-                "SELECT COUNT(*) FROM bookings WHERE machine_id=? AND date=?",
-                (machine_id, date_str)
-            )
-            booked = cur.fetchone()[0]
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
+    await safe_edit(callback.message, text=f"📅 {date}\nВыберите машину:", reply_markup=kb)
 
-        free = total_slots - booked
-
-        if free <= 0:
-            text = f"⚫️ {date.strftime('%d.%m')} — нет свободных мест"
-            days_buttons.append([InlineKeyboardButton(text=text, callback_data="none")])
-        else:
-            text = f"📅 {date.strftime('%d.%m')} — {free} свободно / {booked} занято"
-            days_buttons.append([InlineKeyboardButton(text=text, callback_data=f"day_{machine_id}_{date_str}")])
-
-    # кнопка выхода в меню
-    days_buttons.append([InlineKeyboardButton(text="⬅️ К машинам", callback_data=f"back_to_machines_{machine_type}")])
-
-    kb = InlineKeyboardMarkup(inline_keyboard=days_buttons)
-    await safe_edit(
-        msg=callback.message,
-        text=f"📅 <b>{machine_name}</b>\n\nВыберите день для записи:",
-        reply_markup=kb,
-        parse_mode="HTML"
-    )
-
-# === Выбор времени со статусами ===
-@router.callback_query(F.data.startswith("day_"))
+# Выбрали машину → выбираем ВРЕМЯ
+@router.callback_query(F.data.startswith("machine_"))
 async def choose_hour(callback: types.CallbackQuery):
-    await callback.answer()  # быстрый ACK
+    await callback.answer()
     try:
         if callback.message:
             await callback.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
 
-    # ожидаем формат: day_{machine_id}_{YYYY-MM-DD}
+    # формат: machine_{machine_id}_{YYYY-MM-DD}
     try:
         _, machine_id_str, date = callback.data.split("_", 2)
         machine_id = int(machine_id_str)
     except Exception:
         return await safe_edit(callback.message, text="⚠️ Неверные данные запроса.")
 
-    # узнаём тип и имя машины (тип нужен для кнопки «К машинам»)
     with get_conn() as conn:
         cur = conn.execute("SELECT type, name FROM machines WHERE id=?", (machine_id,))
         row = cur.fetchone()
@@ -181,22 +140,17 @@ async def choose_hour(callback: types.CallbackQuery):
         return await safe_edit(callback.message, text="Ошибка: машина не найдена.")
     machine_type, machine_name = row
 
-    free_hours = set(get_free_hours(machine_id, date))  # ускоряем membership
+    free_hours = set(get_free_hours(machine_id, date))
     all_hours = range(9, 24)
 
     now = now_local()
-
     selected_date = datetime.fromisoformat(date).date()
-    is_today = (selected_date == now.date())
-    current_hour = now.hour
 
     kb_rows = []
     has_free = False
     for h in all_hours:
-       # if is_today and h <= current_hour:
-       #     continue
         slot_dt = datetime.combine(selected_date, time(hour=h, tzinfo=TZ))
-        if slot_dt <= now_local():
+        if slot_dt <= now:
             continue  # скрываем прошедшие часы
 
         if h in free_hours:
@@ -206,12 +160,10 @@ async def choose_hour(callback: types.CallbackQuery):
         else:
             kb_rows.append([InlineKeyboardButton(text=f"🔴 {h:02d}:00", callback_data="busy")])
 
-    # Кнопки "Назад"
     kb_rows.append([
-        InlineKeyboardButton(text="⬅️ К дням", callback_data=f"back_to_days_{machine_id}"),
-        InlineKeyboardButton(text="⬅️ К машинам", callback_data=f"back_to_machines_{machine_type}"),
+        InlineKeyboardButton(text="⬅️ К машинам", callback_data=f"back_to_machines_all_{date}"),
+        InlineKeyboardButton(text="⬅️ К датам", callback_data="back_to_dates"),
     ])
-
     kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
 
     if not has_free:
@@ -226,29 +178,27 @@ async def choose_hour(callback: types.CallbackQuery):
         parse_mode="HTML"
     )
 
-# === Защита от клика по занятым слотам ===
+# Защита от клика по занятым слотам
 @router.callback_query(F.data == "busy")
 async def busy_slot(callback: types.CallbackQuery):
     await callback.answer("Этот слот уже занят ❌", show_alert=True)
 
+# Главное меню
 @router.callback_query(F.data == "to_menu")
 async def back_to_menu(callback: types.CallbackQuery):
-    await callback.message.delete()  # убираем старое сообщение с inline-кнопками
+    await callback.message.delete()
     await callback.message.answer("🏠 Главное меню:", reply_markup=main_menu)
 
-# === Финальное бронирование ===
+# Подтверждение брони (с проверкой «1 запись на тип в сутки»)
 @router.callback_query(F.data.startswith("book_"))
 async def finalize(callback: types.CallbackQuery):
-    await callback.answer()  # быстрый ACK
-
-    # убираем инлайн-клавиатуру, если есть
+    await callback.answer()
     try:
         if callback.message:
             await callback.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
 
-    # разбор данных слота
     try:
         _, machine_id_str, date_str, hour_str = callback.data.split("_")
         machine_id, hour = int(machine_id_str), int(hour_str)
@@ -259,18 +209,16 @@ async def finalize(callback: types.CallbackQuery):
     if not user:
         return await safe_edit(callback.message, "Сначала пройдите регистрацию с помощью /start")
 
-    # --- блокируем запись в прошлое (локальный часовой пояс) ---
     try:
         sel_date = datetime.fromisoformat(date_str).date()
     except ValueError:
         return await safe_edit(callback.message, "Некорректная дата слота.")
 
-    now = datetime.now(TZ)
+    now = now_local()
     slot_dt = datetime.combine(sel_date, time(hour=hour, tzinfo=TZ))
     if slot_dt <= now:
         return await safe_edit(callback.message, "⏳ Это время уже прошло. Выберите другой слот.")
 
-    # получаем тип/имя машины
     with get_conn() as conn:
         cur = conn.execute("SELECT type, name FROM machines WHERE id=?", (machine_id,))
         row = cur.fetchone()
@@ -286,10 +234,10 @@ async def finalize(callback: types.CallbackQuery):
             text=f"⚠️ Вы уже записаны на {type_text} в этот день!\nМожно только одну запись на каждый тип машины в сутки.",
         )
 
-    # пробуем забронировать (уникальный индекс словит гонку)
+    # бронируем (уникальный индекс словит гонку)
     try:
         create_booking(user[0], machine_id, date_str, hour)
-    except sqlite3.IntegrityError:
+    except Exception:
         return await safe_edit(
             msg=callback.message,
             text="⚠️ Этот слот только что заняли.\nПожалуйста, выберите другое время ⏰",
@@ -307,7 +255,7 @@ async def finalize(callback: types.CallbackQuery):
         parse_mode="HTML"
     )
 
-    # напоминание за час (если ещё имеет смысл)
+    # напоминание за час
     try:
         if slot_dt - timedelta(hours=1) > now:
             bot: Bot = callback.bot
@@ -315,8 +263,9 @@ async def finalize(callback: types.CallbackQuery):
     except Exception:
         pass
 
-
-# === Просмотр и отмена записи ===
+# -----------------------------------------
+# Просмотр и отмена записей (как было)
+# -----------------------------------------
 @router.message(F.text == "/cancel")
 async def show_user_bookings(msg: types.Message):
     user = get_user(msg.from_user.id)
@@ -349,15 +298,13 @@ async def cancel_booking(callback: types.CallbackQuery):
         conn.execute("DELETE FROM bookings WHERE id=?", (booking_id,))
     await safe_edit(msg=callback.message, text="🗑️ Запись отменена.")
 
-
-# === Просмотр всех активных записей без отмены ===
 @router.message(F.text == "/mybookings")
 async def show_future_bookings(msg: types.Message):
     user = get_user(msg.from_user.id)
     if not user:
         return await msg.answer("Сначала пройдите регистрацию с помощью /start")
 
-    today = datetime.now().date()
+    today = now_local().date()
     with get_conn() as conn:
         cur = conn.execute("""
             SELECT m.name, b.date, b.hour
@@ -378,9 +325,10 @@ async def show_future_bookings(msg: types.Message):
 
     await msg.answer(text, parse_mode="HTML")
 
+# Кнопки из главного меню
 @router.message(F.text == "🧺 Записаться")
 async def btn_book(msg: types.Message):
-    await choose_type(msg)
+    await choose_date_first(msg)
 
 @router.message(F.text == "📋 Мои записи")
 async def btn_mybookings(msg: types.Message):
@@ -390,13 +338,12 @@ async def btn_mybookings(msg: types.Message):
 async def btn_cancel(msg: types.Message):
     await show_user_bookings(msg)
 
-
-# === Помощь / информация ===
+# Помощь
 @router.message(F.text == "ℹ️ Помощь")
 async def show_help(msg: types.Message):
     help_text = (
         "ℹ️ <b>Помощь по использованию бота</b>\n\n"
-        "🧺 <b>Запись</b> – выберите свободное время и машину, чтобы записаться на стирку или сушку.\n"
+        "🧺 <b>Запись</b> – выберите дату → машину → время.\n"
         "📋 <b>Мои записи</b> – покажет все ваши активные записи.\n"
         "❌ <b>Отменить запись</b> – удалит вашу текущую бронь.\n\n"
         "⏰ Запись доступна с 9:00 до 23:00, не более одного слота в день.\n"
@@ -413,46 +360,31 @@ async def cmd_help(msg: types.Message):
 async def inactive_day(callback: types.CallbackQuery):
     await callback.answer("⚠️ В этот день все слоты заняты.", show_alert=True)
 
-# из выбора времени → к дням
-@router.callback_query(F.data.startswith("back_to_days_"))
-async def back_to_days(callback: types.CallbackQuery):
+# -------- Навигация «Назад» --------
+@router.callback_query(F.data == "back_to_dates")
+async def back_to_dates(callback: types.CallbackQuery):
     await callback.answer()
-    machine_id = int(callback.data.split("_")[3])
-    # вызываем тот же код, что и при выборе машины
-    await choose_day(callback=callback, machine_id=machine_id)  # переиспользуем существующий хендлер
+    await choose_date_first(callback.message)
 
-
-# из выбора дней → к выбору машин
-@router.callback_query(F.data.startswith("back_to_machines_"))
-async def back_to_machines(callback: types.CallbackQuery):
+@router.callback_query(F.data.startswith("back_to_machines_all_"))
+async def back_to_machines_all(callback: types.CallbackQuery):
     await callback.answer()
-    type_ = callback.data.split("_", 3)[3]  # будет 'wash' или 'dry'
+    # формат: back_to_machines_all_{date}
+    _, _, _, date = callback.data.split("_", 3)
 
-    machines = get_machines_by_type(type_) or []
-    # на всякий случай fallback: если вдруг передали id
-    if not machines and type_.isdigit():
-        with get_conn() as conn:
-            cur = conn.execute("SELECT type FROM machines WHERE id=?", (int(type_),))
-            row = cur.fetchone()
-            if row:
-                type_ = row[0]
-                machines = get_machines_by_type(type_) or []
+    with get_conn() as conn:
+        cur = conn.execute("SELECT id, type, name FROM machines ORDER BY type, id")
+        machines = cur.fetchall()
 
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=m[2], callback_data=f"machine_{m[0]}")] for m in machines
-    ])
-    # «назад к типам»
-    kb.inline_keyboard.append([InlineKeyboardButton(text="⬅️ К типам", callback_data="back_to_types")])
+    rows = []
+    for m in machines:
+        machine_id, machine_type, machine_name = m
+        free_cnt = len(get_free_hours(machine_id, date))
+        busy_cnt = 15 - free_cnt
+        emoji = "🧺" if machine_type == "wash" else "🌬️"
+        label = f"{emoji} {machine_name} — свободно: {free_cnt} / занято: {busy_cnt}"
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"machine_{machine_id}_{date}")])
 
-    await safe_edit(callback.message, text="Выберите машину:", reply_markup=kb)
-
-
-# из выбора машин → к выбору типа
-@router.callback_query(F.data == "back_to_types")
-async def back_to_types(callback: types.CallbackQuery):
-    await callback.answer()
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="Стиральная машина", callback_data="type_wash")],
-        [InlineKeyboardButton(text="Сушилка", callback_data="type_dry")]
-    ])
-    await safe_edit(callback.message, text="Выберите тип машины:", reply_markup=kb)
+    rows.append([InlineKeyboardButton(text="⬅️ К датам", callback_data="back_to_dates")])
+    kb = InlineKeyboardMarkup(inline_keyboard=rows)
+    await safe_edit(callback.message, text=f"📅 {date}\nВыберите машину:", reply_markup=kb)
