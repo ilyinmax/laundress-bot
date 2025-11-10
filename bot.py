@@ -20,6 +20,8 @@ async def main():
     bot = Bot(token=BOT_TOKEN)
     dp = Dispatcher()
 
+    await bot.delete_webhook(drop_pending_updates=True)
+
     dp.include_router(registration.router)
     dp.include_router(booking.router)
     dp.include_router(admin.router)
