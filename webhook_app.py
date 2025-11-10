@@ -10,7 +10,7 @@ from handlers.admin import router as admin_router
 
 # --- Токен и URL ---
 #BOT_TOKEN = os.getenv("BOT_TOKEN")
-BOT_TOKEN = os.getenv("8300246721:AAHp6A7VIuqwmOfuHkDyLz5yek9FvIiIgbM")
+BOT_TOKEN = "8300246721:AAHp6A7VIuqwmOfuHkDyLz5yek9FvIiIgbM"
 WEBHOOK_URL = os.getenv("RENDER_EXTERNAL_URL")  # Render сам задаёт этот URL
 #assert BOT_TOKEN, "❌ BOT_TOKEN не задан"
 
