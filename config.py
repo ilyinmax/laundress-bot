@@ -1,5 +1,7 @@
 import os
 
+TIMEZONE = "Europe/Moscow"
+
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = [1438843200, 2038755591, 606585432]
 

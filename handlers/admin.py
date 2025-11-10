@@ -62,24 +62,25 @@ async def show_stats(callback: types.CallbackQuery):
         return await callback.answer("🚫 Нет доступа.")
 
     today = datetime.now().date()
-    week_ago = today - timedelta(days=7)
+    week_end = today + timedelta(days=6) # ближайшие 7 дней (включая сегодня)
 
     with get_conn() as conn:
-        cur = conn.execute("""
-            SELECT COUNT(*) FROM bookings WHERE date >= ? AND date <= ?
-        """, (week_ago.isoformat(), today.isoformat()))
-        total = cur.fetchone()[0]
+        total = conn.execute(
+            "SELECT COUNT(*) FROM bookings WHERE date >= ? AND date <= ?",
+            (today.isoformat(), week_end.isoformat())
+        ).fetchone()[0]
 
-        cur = conn.execute("""
+        by_type = conn.execute("""
             SELECT m.type, COUNT(*) FROM bookings b
             JOIN machines m ON b.machine_id = m.id
-            WHERE date >= ? AND date <= ?
+            WHERE b.date >= ? AND b.date <= ?
             GROUP BY m.type
-        """, (week_ago.isoformat(), today.isoformat()))
-        by_type = cur.fetchall()
+        """, (today.isoformat(), week_end.isoformat())).fetchall()
 
-    text = f"📊 <b>Статистика за неделю ({week_ago.strftime('%d.%m')} – {today.strftime('%d.%m')})</b>\n\n"
-    text += f"Всего записей: <b>{total}</b>\n\n"
+    text = (
+        f"📊 <b>Статистика на неделю ({today.strftime('%d.%m')} – {week_end.strftime('%d.%m')})</b>\n\n"
+        f"Всего записей: <b>{total}</b>\n\n"
+    )
 
     for t, count in by_type:
         emoji = "🧺" if t == "wash" else "🌬"

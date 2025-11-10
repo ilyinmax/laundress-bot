@@ -2,8 +2,12 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
 from datetime import datetime, timedelta
 from database import cleanup_old_bookings
+from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta, time
+from config import TIMEZONE
+TZ = ZoneInfo(TIMEZONE)
 
-scheduler = AsyncIOScheduler()
+scheduler = AsyncIOScheduler(timezone=TZ)
 
 def setup_scheduler():
     if not scheduler.running:
@@ -21,10 +25,10 @@ async def schedule_reminder(bot, user_id, machine_name, date_str, hour):
     Создаёт задачу на отправку напоминания за 1 час до начала записи.
     """
     date_obj = datetime.fromisoformat(date_str)
-    reminder_time = datetime.combine(date_obj, datetime.min.time()) + timedelta(hours=hour - 1)
-
+    reminder_time = datetime.combine(datetime.fromisoformat(date_str),
+                                     time(hour=hour - 1, tzinfo=TZ))
     # Если время уже прошло — не создаём напоминание
-    if reminder_time < datetime.now():
+    if reminder_time <= datetime.now(TZ):
         return
 
     trigger = DateTrigger(run_date=reminder_time)

@@ -8,6 +8,14 @@ from scheduler import schedule_reminder
 from aiogram import Bot
 import sqlite3
 from aiogram.exceptions import TelegramBadRequest
+from datetime import datetime, timedelta, time
+from zoneinfo import ZoneInfo
+from config import WASHING_MACHINES, DRYERS, TIMEZONE
+
+TZ = ZoneInfo(TIMEZONE)
+
+def now_local() -> datetime:
+    return datetime.now(TZ)
 
 router = Router()
 
@@ -98,7 +106,7 @@ async def choose_day(callback: types.CallbackQuery, machine_id: int | None = Non
     if not machine_id:
         machine_id = int(callback.data.split("_")[1])
 
-    now = datetime.now()
+    now = now_local()
     today = now.date()
 
     # если уже 23:00 или позже, убираем сегодняшний день
@@ -176,7 +184,8 @@ async def choose_hour(callback: types.CallbackQuery):
     free_hours = set(get_free_hours(machine_id, date))  # ускоряем membership
     all_hours = range(9, 24)
 
-    now = datetime.now()
+    now = now_local()
+
     selected_date = datetime.fromisoformat(date).date()
     is_today = (selected_date == now.date())
     current_hour = now.hour
@@ -184,8 +193,12 @@ async def choose_hour(callback: types.CallbackQuery):
     kb_rows = []
     has_free = False
     for h in all_hours:
-        if is_today and h <= current_hour:
-            continue
+       # if is_today and h <= current_hour:
+       #     continue
+        slot_dt = datetime.combine(selected_date, time(hour=h, tzinfo=TZ))
+        if slot_dt <= now_local():
+            continue  # скрываем прошедшие часы
+
         if h in free_hours:
             kb_rows.append([InlineKeyboardButton(text=f"🟢 {h:02d}:00",
                                                  callback_data=f"book_{machine_id}_{date}_{h}")])
@@ -227,59 +240,80 @@ async def back_to_menu(callback: types.CallbackQuery):
 @router.callback_query(F.data.startswith("book_"))
 async def finalize(callback: types.CallbackQuery):
     await callback.answer()  # быстрый ACK
+
+    # убираем инлайн-клавиатуру, если есть
     try:
         if callback.message:
             await callback.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
-    _, machine_id, date, hour = callback.data.split("_")
-    machine_id, hour = int(machine_id), int(hour)
-    user = get_user(callback.from_user.id)
 
-    # получаем тип и имя машины
+    # разбор данных слота
+    try:
+        _, machine_id_str, date_str, hour_str = callback.data.split("_")
+        machine_id, hour = int(machine_id_str), int(hour_str)
+    except Exception:
+        return await safe_edit(callback.message, "Некорректные данные слота. Откройте /book заново.")
+
+    user = get_user(callback.from_user.id)
+    if not user:
+        return await safe_edit(callback.message, "Сначала пройдите регистрацию с помощью /start")
+
+    # --- блокируем запись в прошлое (локальный часовой пояс) ---
+    try:
+        sel_date = datetime.fromisoformat(date_str).date()
+    except ValueError:
+        return await safe_edit(callback.message, "Некорректная дата слота.")
+
+    now = datetime.now(TZ)
+    slot_dt = datetime.combine(sel_date, time(hour=hour, tzinfo=TZ))
+    if slot_dt <= now:
+        return await safe_edit(callback.message, "⏳ Это время уже прошло. Выберите другой слот.")
+
+    # получаем тип/имя машины
     with get_conn() as conn:
         cur = conn.execute("SELECT type, name FROM machines WHERE id=?", (machine_id,))
         row = cur.fetchone()
         if not row:
-            await safe_edit(msg=callback.message, text="Ошибка: машина не найдена.")
+            return await safe_edit(msg=callback.message, text="Ошибка: машина не найдена.")
         machine_type, machine_name = row
 
-    # проверяем ограничение: 1 запись на ТИП в день (стиралка/сушилка)
-    if get_user_bookings_today(user[0], date, machine_type):
+    # ограничение: 1 запись на тип (wash/dry) в сутки
+    if get_user_bookings_today(user[0], date_str, machine_type):
         type_text = "стиральную машину" if machine_type == "wash" else "сушилку"
         return await safe_edit(
             msg=callback.message,
-            text=(
-                f"⚠️ Вы уже записаны на {type_text} в этот день!\n"
-                f"Можно только одну запись на каждый тип машины в сутки."
-            ),
+            text=f"⚠️ Вы уже записаны на {type_text} в этот день!\nМожно только одну запись на каждый тип машины в сутки.",
         )
 
-    # пробуем забронировать 1 раз (и только здесь!)
+    # пробуем забронировать (уникальный индекс словит гонку)
     try:
-        make_booking(user[0], machine_id, date, hour)
+        make_booking(user[0], machine_id, date_str, hour)
     except sqlite3.IntegrityError:
-        # слот уже успели занять конкурентно — сообщаем аккуратно
         return await safe_edit(
             msg=callback.message,
             text="⚠️ Этот слот только что заняли.\nПожалуйста, выберите другое время ⏰",
             parse_mode="HTML",
         )
 
-    # подтверждение + напоминание
+    # подтверждение
     await safe_edit(
         msg=callback.message,
         text=(f"✅ Запись подтверждена!\n\n"
-              f"📅 Дата: {date}\n"
-              f"⏰ Время: {hour}:00\n"
+              f"📅 Дата: {date_str}\n"
+              f"⏰ Время: {hour:02d}:00\n"
               f"🧺 {machine_name}\n\n"
               f"Для отмены используйте /cancel"),
         parse_mode="HTML"
     )
 
-    # напоминание за час до начала
-    bot: Bot = callback.bot
-    await schedule_reminder(bot, callback.from_user.id, machine_name, date, hour)
+    # напоминание за час (если ещё имеет смысл)
+    try:
+        if slot_dt - timedelta(hours=1) > now:
+            bot: Bot = callback.bot
+            await schedule_reminder(bot, callback.from_user.id, machine_name, date_str, hour)
+    except Exception:
+        pass
 
 
 # === Просмотр и отмена записи ===
@@ -356,19 +390,18 @@ async def btn_mybookings(msg: types.Message):
 async def btn_cancel(msg: types.Message):
     await show_user_bookings(msg)
 
-HELP_URL = "https://t.me/c/2528999666/11"
 
 # === Помощь / информация ===
 @router.message(F.text == "ℹ️ Помощь")
 async def show_help(msg: types.Message):
     help_text = (
         "ℹ️ <b>Помощь по использованию бота</b>\n\n"
-        "🧺 <b>Запись</b> — выберите свободное время и машину, чтобы записаться на стирку или сушку.\n"
-        "📋 <b>Мои записи</b> — покажет все ваши активные записи.\n"
-        "❌ <b>Отменить запись</b> — удалит вашу текущую бронь.\n\n"
+        "🧺 <b>Запись</b> – выберите свободное время и машину, чтобы записаться на стирку или сушку.\n"
+        "📋 <b>Мои записи</b> – покажет все ваши активные записи.\n"
+        "❌ <b>Отменить запись</b> – удалит вашу текущую бронь.\n\n"
         "⏰ Запись доступна с 9:00 до 23:00, не более одного слота в день.\n"
-        "📅 Можно записаться максимум на 2 дня вперёд (сегодня, завтра, послезавтра).\n"
-        "Если есть вопросы — пишите в <a href='{HELP_URL}'>Жалобы</a>."
+        "📅 Можно записаться максимум на 2 дня вперёд (сегодня, завтра, послезавтра).\n\n"
+        "Если есть вопросы и предложения – пишите @ilyinmax."
     )
     await msg.answer(help_text, parse_mode="HTML")
 
