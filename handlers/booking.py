@@ -25,22 +25,31 @@ def _norm_kb(kb: InlineKeyboardMarkup | None):
 async def safe_edit(msg: Message, *, text: str | None = None,
                     reply_markup: InlineKeyboardMarkup | None = None,
                     parse_mode: str | None = "HTML"):
-    cur_text = msg.text or msg.caption or ""
+    if msg is None:
+        return None
+
+    cur_text = (msg.text or msg.caption or "")
     cur_kb = _norm_kb(getattr(msg, "reply_markup", None))
     new_kb = _norm_kb(reply_markup)
 
     try:
+        # меняем текст (и при необходимости клавиатуру)
         if text is not None and text != cur_text:
-            return await msg.safe_edit(text, reply_markup=reply_markup, parse_mode=parse_mode)
-        elif new_kb is not None and new_kb != cur_kb:
+            return await msg.edit_text(text, reply_markup=reply_markup, parse_mode=parse_mode)
+
+        # текст тот же — меняем только клавиатуру, если она реально другая
+        if new_kb is not None and new_kb != cur_kb:
             return await msg.edit_reply_markup(reply_markup=reply_markup)
-        else:
-            return None  # нечего менять — ничего не делаем
+
+        # ничего не изменилось — ничего не делаем
+        return None
+
     except TelegramBadRequest as e:
         s = str(e).lower()
         if "message is not modified" in s or "message to edit not found" in s:
             return None
         raise
+
 
 
 # === Команда бронирования ===
@@ -70,7 +79,8 @@ async def choose_machine(callback: types.CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=m[2], callback_data=f"machine_{m[0]}")] for m in machines
     ])
-    await callback.message.safe_edit("Выберите машину:", reply_markup=kb)
+    await safe_edit(msg=callback.message, text="Выберите машину:", reply_markup=kb)
+
 
 # === Выбор дня ===
 @router.callback_query(F.data.startswith("machine_"))
@@ -126,7 +136,7 @@ async def choose_day(callback: types.CallbackQuery):
 
     kb = InlineKeyboardMarkup(inline_keyboard=days_buttons)
     await safe_edit(
-        callback.message,
+        msg=callback.message,
         text=f"📅 <b>{machine_name}</b>\n\nВыберите день для записи:",
         reply_markup=kb,
         parse_mode="HTML"
@@ -173,7 +183,7 @@ async def choose_hour(callback: types.CallbackQuery):
     if not has_any:
         return await safe_edit(callback.message, text=f"На {date} свободных часов не осталось.", reply_markup=kb)
 
-    await safe_edit(callback.message, text=f"Выберите время ({date}):", reply_markup=kb)
+    await safe_edit(msg=callback.message, text=f"Выберите время ({date}):", reply_markup=kb)
 
 # === Защита от клика по занятым слотам ===
 @router.callback_query(F.data == "busy")
@@ -203,13 +213,13 @@ async def finalize(callback: types.CallbackQuery):
         cur = conn.execute("SELECT type, name FROM machines WHERE id=?", (machine_id,))
         row = cur.fetchone()
         if not row:
-            await safe_edit(callback.message, text="Ошибка: машина не найдена.")
+            await safe_edit(msg=callback.message, text="Ошибка: машина не найдена.")
         machine_type, machine_name = row
 
     # проверяем ограничение: 1 запись на ТИП в день (стиралка/сушилка)
     if get_user_bookings_today(user[0], date, machine_type):
         type_text = "стиральную машину" if machine_type == "wash" else "сушилку"
-        return await callback.message.safe_edit(
+        return await safe_edit(
             f"⚠️ Вы уже записаны на {type_text} в этот день!\n"
             f"Можно только одну запись на каждый тип машины в сутки."
         )
@@ -219,20 +229,22 @@ async def finalize(callback: types.CallbackQuery):
         make_booking(user[0], machine_id, date, hour)
     except sqlite3.IntegrityError:
         # слот уже успели занять конкурентно — сообщаем аккуратно
-        return await callback.message.safe_edit(
+        return await safe_edit(
             "⚠️ Этот слот только что заняли.\n"
             "Пожалуйста, выберите другое время ⏰",
             parse_mode="HTML"
         )
 
     # подтверждение + напоминание
-    await safe_edit(callback.message, text=(
-        f"✅ Запись подтверждена!\n\n"
-        f"📅 Дата: {date}\n"
-        f"⏰ Время: {hour}:00\n"
-        f"🧺 {machine_name}\n\n"
-        f"Для отмены используйте /cancel"
-    ), parse_mode="HTML")
+    await safe_edit(
+        msg=callback.message,
+        text=(f"✅ Запись подтверждена!\n\n"
+              f"📅 Дата: {date}\n"
+              f"⏰ Время: {hour}:00\n"
+              f"🧺 {machine_name}\n\n"
+              f"Для отмены используйте /cancel"),
+        parse_mode="HTML"
+    )
 
     # напоминание за час до начала
     bot: Bot = callback.bot
@@ -270,7 +282,7 @@ async def cancel_booking(callback: types.CallbackQuery):
     booking_id = int(callback.data.split("_")[1])
     with get_conn() as conn:
         conn.execute("DELETE FROM bookings WHERE id=?", (booking_id,))
-    await callback.message.safe_edit("🗑️ Запись отменена.")
+    await safe_edit("🗑️ Запись отменена.")
 
 # === Просмотр всех активных записей без отмены ===
 @router.message(F.text == "/mybookings")
