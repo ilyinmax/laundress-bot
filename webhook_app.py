@@ -5,6 +5,8 @@ from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
+from database import init_db
+init_db()
 
 # === ENV ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")

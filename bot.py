@@ -6,6 +6,8 @@ from database import init_db, add_machine, get_machines_by_type
 from scheduler import setup_scheduler, schedule_reminder
 
 from handlers import registration, booking, admin
+from database import init_db
+init_db()
 
 
 async def main():

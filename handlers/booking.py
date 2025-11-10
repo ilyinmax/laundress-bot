@@ -288,7 +288,7 @@ async def finalize(callback: types.CallbackQuery):
 
     # пробуем забронировать (уникальный индекс словит гонку)
     try:
-        make_booking(user[0], machine_id, date_str, hour)
+        create_booking(user[0], machine_id, date_str, hour)
     except sqlite3.IntegrityError:
         return await safe_edit(
             msg=callback.message,

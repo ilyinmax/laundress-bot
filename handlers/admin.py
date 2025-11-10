@@ -1,7 +1,7 @@
 from aiogram import Router, types, F
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from datetime import datetime, timedelta
-from database import get_conn, b64_decode_field
+from database import get_conn, _b64d_try
 from config import ADMIN_IDS
 from openpyxl import Workbook
 import os
@@ -134,8 +134,8 @@ async def show_admin_schedule(callback: types.CallbackQuery):
     current_machine = None
 
     for booking_id, machine, hour, surname, room in records:
-        surname = b64_decode_field(surname)
-        room = b64_decode_field(room)
+        surname = _b64d_try(surname)
+        room = _b64d_try(room)
         if machine != current_machine:
             text += f"\n<b>{machine}</b>\n"
             current_machine = machine
@@ -229,8 +229,8 @@ async def export_bookings(msg: types.Message):
     # Добавляем строки
     for row in rows:
         id_, date, hour, machine, mtype, surname, room = row
-        surname = b64_decode_field(surname)
-        room = b64_decode_field(room)
+        surname = _b64d_try(surname)
+        room = _b64d_try(room)
         ws.append([id_, date, f"{hour}:00", machine, mtype, surname, room])
 
     # Красивый авторазмер колонок
@@ -284,7 +284,7 @@ async def export_bookings(callback: types.CallbackQuery):
 
     for id_, date, hour, machine, mtype, surname, room in rows:
         ws.append([id_, date, f"{hour}:00", machine, mtype,
-                   b64_decode_field(surname), b64_decode_field(room)])
+                   _b64d_try(surname), _b64d_try(room)])
 
     # автоширина
     for col in ws.columns:

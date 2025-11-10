@@ -3,3 +3,6 @@ aiohttp>=3.9
 APScheduler>=3.10
 openpyxl>=3.1
 tzdata
+psycopg2-binary>=2.9
+pandas
+openpyxl
