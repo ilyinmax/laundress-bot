@@ -1,50 +1,62 @@
+# webhook_app.py — aiogram v3 + aiohttp, Web Service на Render
 import os
+import aiohttp
 from aiohttp import web
 from aiogram import Bot, Dispatcher
-from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
-from handlers.booking import router as booking_router
-from handlers.registration import router as registration_router
-from handlers.admin import router as admin_router
-
-
-# --- Токен и URL ---
+# === ENV ===
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-#BOT_TOKEN = "8300246721:AAHp6A7VIuqwmOfuHkDyLz5yek9FvIiIgbM"
-BASE_URL = os.getenv("RENDER_EXTERNAL_URL")  # Render сам задаёт этот URL
-#assert BOT_TOKEN, "❌ BOT_TOKEN не задан"
+if not BOT_TOKEN:
+    raise RuntimeError("BOT_TOKEN не задан")
 
-WEBHOOK_PATH = "/webhook"                    # путь на нашем сервисе
-WEBHOOK_URL  = f"{BASE_URL}{WEBHOOK_PATH}"   # полный URL, который увидит Telegram
+# Render обычно сам проставляет RENDER_EXTERNAL_URL,
+# если нет — задай WEBHOOK_BASE_URL вручную в переменных окружения.
+BASE_URL = os.getenv("RENDER_EXTERNAL_URL") or os.getenv("WEBHOOK_BASE_URL")
+if not BASE_URL:
+    raise RuntimeError("Не задан BASE_URL (RENDER_EXTERNAL_URL или WEBHOOK_BASE_URL)")
 
+WEBHOOK_PATH = "/webhook"
+WEBHOOK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
 
-bot = Bot(token=BOT_TOKEN)
+# === Telegram client с таймаутами ===
+session = AiohttpSession(timeout=aiohttp.ClientTimeout(total=15, connect=5, sock_read=10))
+bot = Bot(token=BOT_TOKEN, session=session)
 dp = Dispatcher()
-dp.include_routers(booking_router, registration_router, admin_router)
 
-# === health и статусы ===
+# === Подключаем твои роутеры ===
+from handlers.registration import router as registration_router
+from handlers.booking import router as booking_router
+from handlers.admin import router as admin_router
+dp.include_routers(registration_router, booking_router, admin_router)
+
+# === /health для Render и пингов ===
 async def health(_):
     return web.json_response({"ok": True})
 
-# --- Webhook сервер ---
+# === on_startup: ставим вебхук ===
 async def on_startup(app: web.Application):
-    await bot.set_webhook(f"{WEBHOOK_URL}/webhook")
-    print(f"✅ Webhook установлен: {WEBHOOK_URL}/webhook")
+    # сбрасываем хвост обновлений и ставим вебхук на наш публичный URL
+    await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
+    print(f"🌍 External URL: {BASE_URL}")
+    print(f"✅ Webhook установлен: {WEBHOOK_URL}")
 
+# === on_cleanup ===
 async def on_cleanup(app: web.Application):
     await bot.session.close()
 
-async def on_shutdown(app: web.Application):
-    await bot.delete_webhook()
-    await bot.session.close()
-
+# === aiohttp-приложение ===
 app = web.Application()
 app.on_startup.append(on_startup)
-app.on_shutdown.append(on_shutdown)
+app.on_cleanup.append(on_cleanup)
 
+# маршруты
+app.router.add_get("/health", health)
 SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
-setup_application(app, dp, bot=bot)
+setup_application(app, dp, bot=bot)  # корректное завершение
 
 if __name__ == "__main__":
-    web.run_app(app, host="0.0.0.0", port=int(os.environ.get("PORT", "10000")))
+    # ОБЯЗАТЕЛЬНО слушаем порт от Render
+    port = int(os.environ.get("PORT", "10000"))
+    web.run_app(app, host="0.0.0.0", port=port)
