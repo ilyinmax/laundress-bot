@@ -1,4 +1,7 @@
-BOT_TOKEN = "8300246721:AAHp6A7VIuqwmOfuHkDyLz5yek9FvIiIgbM"
+import os
+
+#BOT_TOKEN = "8300246721:AAHp6A7VIuqwmOfuHkDyLz5yek9FvIiIgbM"
+BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = [1438843200, 2038755591, 606585432]
 
 WASHING_MACHINES = ["Стиральная №1", "Стиральная №6"]

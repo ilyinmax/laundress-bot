@@ -1,15 +1,15 @@
 import asyncio
 from aiogram import Bot, Dispatcher
+
 from config import BOT_TOKEN, WASHING_MACHINES, DRYERS
-from database import init_db, add_machine
+from database import init_db, add_machine, get_machines_by_type
 from scheduler import setup_scheduler, schedule_reminder
+
 from handlers import registration, booking, admin
 
 async def main():
     init_db()
-
     # добавляем машины, если ещё нет
-    from database import get_machines_by_type
     if not get_machines_by_type("wash"):
         for w in WASHING_MACHINES:
             add_machine("wash", w)
@@ -27,10 +27,8 @@ async def main():
     scheduler = setup_scheduler()
 
     print("Бот запущен 🚀")
-    await dp.start_polling(bot)
-
     try:
-        await dp.start_polling(bot)
+        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     except KeyboardInterrupt:
         print("⛔️ Бот остановлен вручную.")
     finally:
