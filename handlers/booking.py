@@ -220,8 +220,11 @@ async def finalize(callback: types.CallbackQuery):
     if get_user_bookings_today(user[0], date, machine_type):
         type_text = "стиральную машину" if machine_type == "wash" else "сушилку"
         return await safe_edit(
-            f"⚠️ Вы уже записаны на {type_text} в этот день!\n"
-            f"Можно только одну запись на каждый тип машины в сутки."
+            msg=callback.message,
+            text=(
+                f"⚠️ Вы уже записаны на {type_text} в этот день!\n"
+                f"Можно только одну запись на каждый тип машины в сутки."
+            ),
         )
 
     # пробуем забронировать 1 раз (и только здесь!)
@@ -230,9 +233,9 @@ async def finalize(callback: types.CallbackQuery):
     except sqlite3.IntegrityError:
         # слот уже успели занять конкурентно — сообщаем аккуратно
         return await safe_edit(
-            "⚠️ Этот слот только что заняли.\n"
-            "Пожалуйста, выберите другое время ⏰",
-            parse_mode="HTML"
+            msg=callback.message,
+            text="⚠️ Этот слот только что заняли.\nПожалуйста, выберите другое время ⏰",
+            parse_mode="HTML",
         )
 
     # подтверждение + напоминание
@@ -282,7 +285,8 @@ async def cancel_booking(callback: types.CallbackQuery):
     booking_id = int(callback.data.split("_")[1])
     with get_conn() as conn:
         conn.execute("DELETE FROM bookings WHERE id=?", (booking_id,))
-    await safe_edit("🗑️ Запись отменена.")
+    await safe_edit(msg=callback.message, text="🗑️ Запись отменена.")
+
 
 # === Просмотр всех активных записей без отмены ===
 @router.message(F.text == "/mybookings")
