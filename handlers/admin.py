@@ -8,7 +8,6 @@ import os
 
 router = Router()
 
-
 # Проверка прав
 def is_admin(user_id) -> bool:
     try:
@@ -17,7 +16,7 @@ def is_admin(user_id) -> bool:
         return False
 
 
-@router.message(F.text.in_({"/admin_panel", "/panel"}))
+@router.message(F.text.in_({"/admin"}))
 async def admin_panel(msg: types.Message):
     if not is_admin(msg.from_user.id):
         return await msg.answer("🚫 У вас нет прав администратора.")
@@ -91,6 +90,7 @@ async def show_stats(callback: types.CallbackQuery):
 
 
 # === Главная команда администратора ===
+"""
 @router.message(F.text == "/admin")
 async def admin_panel(msg: types.Message):
     if not is_admin(msg.from_user.id):
@@ -105,7 +105,7 @@ async def admin_panel(msg: types.Message):
         for i in range(3)
     ])
     await msg.answer("📅 Выберите день для просмотра расписания:", reply_markup=kb)
-
+"""
 
 # === Просмотр расписания по дню ===
 @router.callback_query(F.data.startswith("admin_day_"))
