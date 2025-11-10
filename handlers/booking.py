@@ -79,19 +79,25 @@ async def choose_machine(callback: types.CallbackQuery):
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=m[2], callback_data=f"machine_{m[0]}")] for m in machines
     ])
+    # добавить кнопку "Назад к типам"
+    kb.inline_keyboard.append([InlineKeyboardButton(text="⬅️ К типам", callback_data="back_to_types")])
+
     await safe_edit(msg=callback.message, text="Выберите машину:", reply_markup=kb)
 
 
 # === Выбор дня ===
 @router.callback_query(F.data.startswith("machine_"))
-async def choose_day(callback: types.CallbackQuery):
-    await callback.answer()  # быстрый ACK
+async def choose_day(callback: types.CallbackQuery, machine_id: int | None = None):
+    await callback.answer()
     try:
         if callback.message:
             await callback.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
-    machine_id = int(callback.data.split("_")[1])
+
+    if not machine_id:
+        machine_id = int(callback.data.split("_")[1])
+
     now = datetime.now()
     today = now.date()
 
@@ -101,10 +107,10 @@ async def choose_day(callback: types.CallbackQuery):
     else:
         start_offset = 0  # включаем сегодня
 
-    # получаем имя машины
+    # получаем тип и имя машины (тип нужен для "назад к машинам")
     with get_conn() as conn:
-        cur = conn.execute("SELECT name FROM machines WHERE id=?", (machine_id,))
-        machine_name = cur.fetchone()[0]
+        cur = conn.execute("SELECT type, name FROM machines WHERE id=?", (machine_id,))
+        machine_type, machine_name = cur.fetchone()
 
     total_slots = 15  # 9:00–23:00
     days_buttons = []
@@ -132,7 +138,7 @@ async def choose_day(callback: types.CallbackQuery):
             days_buttons.append([InlineKeyboardButton(text=text, callback_data=f"day_{machine_id}_{date_str}")])
 
     # кнопка выхода в меню
-    days_buttons.append([InlineKeyboardButton(text="🔙 В меню", callback_data="to_menu")])
+    days_buttons.append([InlineKeyboardButton(text="⬅️ К машинам", callback_data=f"back_to_machines_{machine_id}")])
 
     kb = InlineKeyboardMarkup(inline_keyboard=days_buttons)
     await safe_edit(
@@ -178,7 +184,11 @@ async def choose_hour(callback: types.CallbackQuery):
         kb.inline_keyboard.append([InlineKeyboardButton(text=text, callback_data=data)])
         has_any = True
 
-    kb.inline_keyboard.append([InlineKeyboardButton(text="🔙 В меню", callback_data="to_menu")])
+    # Кнопки "Назад"
+    back_buttons = []
+    back_buttons.append(InlineKeyboardButton(text="⬅️ К дням", callback_data=f"back_to_days_{machine_id}"))
+    back_buttons.append(InlineKeyboardButton(text="🏠 К типам", callback_data="back_to_types"))
+    kb.inline_keyboard.append(back_buttons)
 
     if not has_any:
         return await safe_edit(callback.message, text=f"На {date} свободных часов не осталось.", reply_markup=kb)
@@ -351,3 +361,36 @@ async def cmd_help(msg: types.Message):
 @router.callback_query(F.data == "none")
 async def inactive_day(callback: types.CallbackQuery):
     await callback.answer("⚠️ В этот день все слоты заняты.", show_alert=True)
+
+# из выбора времени → к дням
+@router.callback_query(F.data.startswith("back_to_days_"))
+async def back_to_days(callback: types.CallbackQuery):
+    await callback.answer()
+    machine_id = int(callback.data.split("_")[3])
+    # вызываем тот же код, что и при выборе машины
+    await choose_day(callback=callback, machine_id=machine_id)  # переиспользуем существующий хендлер
+
+
+# из выбора дней → к выбору машин
+@router.callback_query(F.data.startswith("back_to_machines_"))
+async def back_to_machines(callback: types.CallbackQuery):
+    await callback.answer()
+    type_ = callback.data.split("_")[3]
+    # имитируем "choose_machine"
+    machines = get_machines_by_type(type_)
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=m[2], callback_data=f"machine_{m[0]}")] for m in machines
+    ])
+    kb.inline_keyboard.append([InlineKeyboardButton(text="⬅️ К типам", callback_data="back_to_types")])
+    await safe_edit(callback.message, text="Выберите машину:", reply_markup=kb)
+
+
+# из выбора машин → к выбору типа
+@router.callback_query(F.data == "back_to_types")
+async def back_to_types(callback: types.CallbackQuery):
+    await callback.answer()
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Стиральная машина", callback_data="type_wash")],
+        [InlineKeyboardButton(text="Сушилка", callback_data="type_dry")]
+    ])
+    await safe_edit(callback.message, text="Выберите тип машины:", reply_markup=kb)

@@ -1,13 +1,12 @@
-import asyncio, os
+import asyncio
 from aiogram import Bot, Dispatcher
 
-from config import WASHING_MACHINES, DRYERS
+from config import BOT_TOKEN, WASHING_MACHINES, DRYERS
 from database import init_db, add_machine, get_machines_by_type
 from scheduler import setup_scheduler, schedule_reminder
 
 from handlers import registration, booking, admin
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
 
 async def main():
     init_db()
