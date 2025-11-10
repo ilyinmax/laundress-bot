@@ -31,7 +31,7 @@ async def main():
     setup_scheduler()
     print("Бот запущен 🚀")
     try:
-        await dp.start_polling(bot)
+        await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     except KeyboardInterrupt:
         print("⛔️ Бот остановлен вручную.")
     finally:
