@@ -217,7 +217,7 @@ def init_db():
                 machine_id INTEGER NOT NULL REFERENCES machines(id) ON DELETE CASCADE,
                 date TEXT NOT NULL,
                 hour INTEGER NOT NULL,
-                created_at TEXT DEFAULT (datetime('now')),
+                created_at TIMESTAMPTZ DEFAULT now(),
                 UNIQUE (machine_id, date, hour)
             );
             """,
@@ -255,7 +255,7 @@ def ensure_ban_tables():
             CREATE TABLE IF NOT EXISTS failed_attempts (
                 tg_id INTEGER UNIQUE NOT NULL,
                 count INTEGER DEFAULT 0,
-                last_attempt TEXT DEFAULT (datetime('now'))
+                last_attempt TIMESTAMPTZ DEFAULT now()
             );
         """)
 
