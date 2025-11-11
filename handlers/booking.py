@@ -62,9 +62,9 @@ async def safe_edit(msg: Message, *, text: str | None = None,
 # -------- вспомогательные подсчёты свободных --------
 def _free_per_type_for_date(date_iso: str) -> tuple[int, int]:
     """
-    Считает количество МАШИН с доступными слотами на дату.
+    Считает КОЛИЧЕСТВО СВОБОДНЫХ ЧАСОВ по типам машин на указанную дату.
     Для 'сегодня' учитываем только будущие часы.
-    Возвращает: (free_wash, free_dry)
+    Возвращает: (free_wash_slots, free_dry_slots)
     """
     now = now_local()
     today_iso = now.date().isoformat()
@@ -73,20 +73,21 @@ def _free_per_type_for_date(date_iso: str) -> tuple[int, int]:
         cur = conn.execute("SELECT id, type FROM machines")
         machines = cur.fetchall()
 
-    free_wash = 0
-    free_dry = 0
+    free_wash_slots = 0
+    free_dry_slots = 0
     for mid, mtype in machines:
         free = get_free_hours(mid, date_iso)
         if date_iso == today_iso:
-            # учитываем только будущие часы
-            free = [h for h in free if h > now.hour]
-        if len(free) > 0:
+            free = [h for h in free if h > now.hour]  # только будущие часы
+        cnt = len(free)
+        if cnt > 0:
             if mtype == "wash":
-                free_wash += 1
+                free_wash_slots += cnt
             else:
-                free_dry += 1
+                free_dry_slots += cnt
 
-    return free_wash, free_dry
+    return free_wash_slots, free_dry_slots
+
 
 def _free_count_for_machine_on_date(machine_id: int, date_iso: str) -> int:
     """Сколько свободных часов у конкретной машины на дату (для 'сегодня' — только будущие)."""
