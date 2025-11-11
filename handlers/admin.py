@@ -21,19 +21,30 @@ router = Router()
 
 # === Проверка на администратора ===
 def _normalize_admin_ids():
+    # ADMIN_IDS может быть: списком/множеством, строкой "123,456", строкой "['123','456']" и т.п.
     if isinstance(ADMIN_IDS, (list, tuple, set)):
-        return {str(x).strip() for x in ADMIN_IDS if str(x).strip()}
-    s = str(ADMIN_IDS).strip().strip("[]")
-    parts = [p.strip() for p in s.split(",") if p.strip()]
-    return {p for p in parts}
+        raw = ADMIN_IDS
+    else:
+        s = str(ADMIN_IDS).strip()
+        if s.startswith("[") and s.endswith("]"):
+            s = s[1:-1]
+        raw = [part for part in s.split(",") if part.strip()]
+
+    norm = set()
+    for x in raw:
+        t = str(x).strip().strip("'").strip('"')   # убираем кавычки и пробелы
+        if t:
+            norm.add(t)
+    return norm
 
 ADMIN_SET = _normalize_admin_ids()
 
-def is_admin(user_id: int) -> bool:
+def is_admin(user_id: int | str) -> bool:
     try:
         return str(int(user_id)) in ADMIN_SET
     except Exception:
         return False
+
 
 async def _render_schedule(message: types.Message, date: str):
     with get_conn() as conn:
@@ -254,8 +265,13 @@ async def admin_ban_user(callback: types.CallbackQuery):
 @router.message(Command("export"))
 @router.callback_query(F.data == "admin_menu_export")
 async def export_bookings(event: types.Message | types.CallbackQuery):
-    msg = event.message if isinstance(event, types.CallbackQuery) else event
-    user_id = msg.from_user.id if msg.from_user else event.from_user.id
+    # корректно извлекаем actor и объект сообщения для ответа
+    if isinstance(event, types.CallbackQuery):
+        user_id = event.from_user.id         # ← именно кликающий
+        msg = event.message
+    else:
+        user_id = event.from_user.id
+        msg = event
 
     if not is_admin(user_id):
         if isinstance(event, types.CallbackQuery):
