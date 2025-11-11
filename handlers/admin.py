@@ -35,6 +35,38 @@ def is_admin(user_id: int) -> bool:
     except Exception:
         return False
 
+async def _render_schedule(message: types.Message, date: str):
+    with get_conn() as conn:
+        cur = conn.execute("""
+            SELECT b.id, m.name, b.hour, u.surname, u.room, u.tg_id
+            FROM bookings b
+            JOIN machines m ON b.machine_id = m.id
+            JOIN users u ON b.user_id = u.id
+            WHERE b.date = ?
+            ORDER BY m.name, b.hour
+        """, (date,))
+        records = cur.fetchall()
+
+    if not records:
+        return await message.edit_text(f"📅 {date}: записей нет.")
+
+    text = f"🧺 <b>Записи на {date}</b>\n\n"
+    buttons = []
+    current_machine = None
+    for booking_id, machine, hour, surname, room, tg_id in records:
+        surname = _b64d_try(surname); room = _b64d_try(room)
+        if machine != current_machine:
+            text += f"\n<b>{machine}</b>\n"; current_machine = machine
+        text += f"  ⏰ {hour}:00 — {surname} (комн. {room})\n"
+        buttons.append([
+            InlineKeyboardButton(text=f"❌ Удалить {hour}:00 ({surname})",
+                                 callback_data=f"admin_del_{booking_id}_{date}"),
+            InlineKeyboardButton(text="🚫 Бан",
+                                 callback_data=f"admin_ban_{tg_id}_{date}")
+        ])
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+
 
 # === Импорт из Excel ===
 def import_bookings_from_xlsx(path: str) -> tuple[int, int, list[str]]:
@@ -180,46 +212,8 @@ async def show_stats(callback: types.CallbackQuery):
 async def show_admin_schedule(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id):
         return await callback.answer("🚫 Нет доступа.")
-
     date = callback.data.split("_", 2)[2]
-    with get_conn() as conn:
-        cur = conn.execute("""
-            SELECT b.id, m.name, b.hour, u.surname, u.room, u.tg_id
-            FROM bookings b
-            JOIN machines m ON b.machine_id = m.id
-            JOIN users u ON b.user_id = u.id
-            WHERE b.date = ?
-            ORDER BY m.name, b.hour
-        """, (date,))
-        records = cur.fetchall()
-
-    if not records:
-        return await callback.message.edit_text(f"📅 {date}: записей нет.")
-
-    text = f"🧺 <b>Записи на {date}</b>\n\n"
-    buttons = []
-    current_machine = None
-
-    for booking_id, machine, hour, surname, room, tg_id in records:
-        surname = _b64d_try(surname)
-        room = _b64d_try(room)
-        if machine != current_machine:
-            text += f"\n<b>{machine}</b>\n"
-            current_machine = machine
-        text += f"  ⏰ {hour}:00 — {surname} (комн. {room})\n"
-        buttons.append([
-            InlineKeyboardButton(
-                text=f"❌ Удалить {hour}:00 ({surname})",
-                callback_data=f"admin_del_{booking_id}_{date}"
-            ),
-            InlineKeyboardButton(
-                text="🚫 Бан",
-                callback_data=f"admin_ban_{tg_id}"
-            )
-        ])
-
-    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+    await _render_schedule(callback.message, date)
 
 
 # === Удаление конкретной записи ===
@@ -235,7 +229,7 @@ async def delete_booking(callback: types.CallbackQuery):
         conn.execute("DELETE FROM bookings WHERE id=?", (booking_id,))
 
     await callback.answer("🗑️ Запись удалена!", show_alert=True)
-    await show_admin_schedule(callback)
+    await _render_schedule(callback.message, date)
 
 
 # === Бан пользователя ===
@@ -245,13 +239,15 @@ async def admin_ban_user(callback: types.CallbackQuery):
         return await callback.answer("🚫 Нет доступа.")
 
     try:
-        tg_id = int(callback.data.split("_", 2)[2])
+        _, _, tg_id_str, date = callback.data.split("_", 3)
+        tg_id = int(tg_id_str)
     except Exception:
-        return await callback.answer("Ошибка: неверный формат ID.")
+        return await callback.answer("Ошибка данных бан-кнопки.", show_alert=True)
 
     ban_user(tg_id, reason="Бан из админ-панели", days=7)
     await callback.answer("🚫 Пользователь заблокирован на 7 дней.", show_alert=True)
-    await show_admin_schedule(callback)
+    await _render_schedule(callback.message, date)
+
 
 
 # === Экспорт записей ===

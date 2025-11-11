@@ -4,6 +4,8 @@ from aiogram.exceptions import TelegramBadRequest
 
 from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
+from database import is_banned, get_conn
+
 
 from config import TIMEZONE
 from keyboards import main_menu
@@ -100,6 +102,22 @@ def _free_count_for_machine_on_date(machine_id: int, date_iso: str) -> int:
 @router.message(F.text == "/book")
 async def choose_date_first(msg: types.Message, user_id: int | None = None, edit: bool = False):
     uid = user_id or (msg.chat.id if getattr(msg, "chat", None) else msg.from_user.id)
+    if is_banned(uid):
+        # подтянем срок/причину, чтобы красиво показать
+        with get_conn() as conn:
+            row = conn.execute("SELECT banned_until, reason FROM banned WHERE tg_id=?", (uid,)).fetchone()
+        until_txt = ""
+        if row and row[0]:
+            try:
+                from datetime import datetime
+                until_txt = datetime.fromisoformat(row[0]).strftime("%d.%m %H:%M")
+            except Exception:
+                until_txt = row[0]
+        reason = (row[1] or "").strip() if row else ""
+        text = "🚫 Вы заблокированы."
+        if until_txt: text += f" До {until_txt}."
+        if reason: text += f"\nПричина: {reason}"
+        return await msg.answer(text)
     user = get_user(uid)
     if not user:
         return await msg.answer("Сначала пройдите регистрацию с помощью /start")
@@ -260,6 +278,9 @@ async def finalize(callback: types.CallbackQuery):
         return await safe_edit(callback.message, "Некорректные данные слота. Откройте /book заново.")
 
     user = get_user(callback.from_user.id)
+    if is_banned(callback.from_user.id):
+        return await safe_edit(callback.message, "🚫 Вы заблокированы и не можете записываться.")
+
     if not user:
         return await safe_edit(callback.message, "Сначала пройдите регистрацию с помощью /start")
 
