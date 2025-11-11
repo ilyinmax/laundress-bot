@@ -82,8 +82,12 @@ def _count_day_slots(date_iso: str) -> tuple[int, int, int]:
 
 # /book — сначала выбираем ДАТУ (с количеством свободных/занятых)
 @router.message(F.text == "/book")
-async def choose_date_first(msg: types.Message):
-    user = get_user(msg.from_user.id)
+async def choose_date_first(msg: types.Message, user_id: int | None = None):
+    uid = user_id or (msg.chat.id if getattr(msg, "chat", None) else msg.from_user.id)
+    user = get_user(uid)
+    if not user:
+        return await msg.answer("Сначала пройдите регистрацию с помощью /start")
+
     if not user:
         return await msg.answer("Сначала пройдите регистрацию с помощью /start")
 
@@ -391,7 +395,7 @@ async def inactive_day(callback: types.CallbackQuery):
 @router.callback_query(F.data == "back_to_dates")
 async def back_to_dates(callback: types.CallbackQuery):
     await callback.answer()
-    await choose_date_first(callback.message)
+    await choose_date_first(callback.message, user_id=callback.from_user.id)
 
 @router.callback_query(F.data.startswith("back_to_machines_all_"))
 async def back_to_machines_all(callback: types.CallbackQuery):
