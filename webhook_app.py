@@ -35,7 +35,7 @@ WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
 
 # === Telegram client с таймаутами ===
-session = AiohttpSession(timeout=aiohttp.ClientTimeout(total=15, connect=5, sock_read=10))
+session = AiohttpSession()
 bot = Bot(token=BOT_TOKEN, session=session)
 dp = Dispatcher()
 

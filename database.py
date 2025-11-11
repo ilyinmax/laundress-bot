@@ -91,12 +91,31 @@ else:
     class _SqliteConn:
         def __init__(self):
             self._conn = sqlite3.connect(DB_PATH)
+            # вариант 1: классический транзакционный режим с commit/rollback в __exit__
+            # (если хочешь автокоммит, сними комментарий со строки ниже и убери логику в __exit__)
+            # self._conn.isolation_level = None  # <- вариант 2: автокоммит
+
         def execute(self, *args, **kwargs):
             return self._conn.execute(*args, **kwargs)
-        def commit(self): self._conn.commit()
-        def close(self): self._conn.close()
-        def __enter__(self): return self
-        def __exit__(self, exc_type, exc, tb): self.close()
+
+        def commit(self):
+            self._conn.commit()
+
+        def close(self):
+            self._conn.close()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            try:
+                if exc_type is None:
+                    self._conn.commit()
+                else:
+                    self._conn.rollback()
+            finally:
+                self._conn.close()
+
 
     def get_conn():
         return _SqliteConn()
@@ -195,7 +214,7 @@ def bind_stub_user_to_real(tg_id, surname, room):
         conn.execute("UPDATE bookings SET user_id=? WHERE user_id=?", (real_id, stub_id))
         conn.execute("DELETE FROM users WHERE id=?", (stub_id,))
 
-# ---------- ниже — функции, которые уже использует твой код ----------
+# ниже — функции, которые уже использует твой код
 def add_user(tg_id, surname, room):
     with get_conn() as conn:
         # было: INSERT OR IGNORE — в Postgres превращается в ON CONFLICT DO NOTHING
