@@ -19,12 +19,24 @@ from database import (
 
 router = Router()
 
-# --- права ---
+# --- устойчивый is_admin ---
+def _normalize_admin_ids():
+    from config import ADMIN_IDS as RAW
+    if isinstance(RAW, (list, tuple, set)):
+        return {str(x).strip() for x in RAW if str(x).strip()}
+    # строка "id1,id2" или "[id1, id2]"
+    s = str(RAW).strip().strip("[]")
+    parts = [p.strip() for p in s.split(",") if p.strip()]
+    return {p for p in parts}
+
+ADMIN_SET = _normalize_admin_ids()
+
 def is_admin(user_id) -> bool:
     try:
-        return int(user_id) in [int(x) for x in ADMIN_IDS]
+        return str(int(user_id)) in ADMIN_SET
     except Exception:
         return False
+
 
 # --- импорт из xlsx ---
 def import_bookings_from_xlsx(path: str) -> tuple[int, int, list[str]]:
@@ -266,6 +278,7 @@ async def admin_ban_user(callback: types.CallbackQuery):
     ban_user(tg_id, reason="Бан из админ-панели", days=7)
     await callback.answer("🚫 Пользователь заблокирован на 7 дней.", show_alert=True)
     # Сообщение списка оставляем как есть (обновление не обязательно)
+    await show_admin_schedule(callback)
 
 # === Экспорт всех записей в Excel ===
 @router.message(F.text == "/export")

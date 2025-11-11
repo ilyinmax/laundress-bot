@@ -132,6 +132,7 @@ async def choose_date_first(msg: types.Message, user_id: int | None = None, edit
         await msg.answer(text, reply_markup=kb)
 '''
 
+# --- /book: выбор даты (кнопки с корректным числом СВОБОДНЫХ машин) ---
 @router.message(F.text == "/book")
 async def choose_date_first(msg: types.Message, user_id: int | None = None, edit: bool = False):
     uid = user_id or (msg.chat.id if getattr(msg, "chat", None) else msg.from_user.id)
@@ -141,39 +142,36 @@ async def choose_date_first(msg: types.Message, user_id: int | None = None, edit
 
     now = now_local()
     today = now.date()
-    start_offset = 1 if now.hour >= 23 else 0
+    start_offset = 1 if now.hour >= 23 else 0  # после 23:00 «сегодня» скрываем
 
     days_buttons = []
     for i in range(start_offset, start_offset + 3):
         d = today + timedelta(days=i)
         d_iso = d.isoformat()
 
-        free_wash = 0
-        free_dry = 0
-
         with get_conn() as conn:
             cur = conn.execute("SELECT id, type FROM machines")
             machines = cur.fetchall()
 
+        free_wash = 0
+        free_dry = 0
         for mid, mtype in machines:
-            hours = get_free_hours(mid, d_iso)
-            if d_iso == today.isoformat():
-                # для сегодняшнего дня — только будущие
-                hours = [h for h in hours if h > now.hour]
-            if not hours:
-                continue
-            if mtype == "wash":
-                free_wash += len(hours)
-            else:
-                free_dry += len(hours)
+            free = get_free_hours(mid, d_iso)
+            # учитываем только будущие часы именно для сегодня
+            if d == today:
+                free = [h for h in free if datetime.combine(d, time(h, tzinfo=TZ)) > now]
+            if len(free) > 0:
+                if mtype == "wash":
+                    free_wash += 1
+                else:
+                    free_dry += 1
 
         d_str = d.strftime("%d.%m")
-        caption = f"📅 {d_str} — 🧺 {free_wash} / 🌬️ {free_dry}"
+        caption = f"📅 {d_str} — 🧺 {free_wash} / 🌬️ {free_dry}" if machines else f"📅 {d_str} — машин нет"
         days_buttons.append([InlineKeyboardButton(text=caption, callback_data=f"date_{d_iso}")])
 
     kb = InlineKeyboardMarkup(inline_keyboard=days_buttons)
     text = "Выберите дату:"
-
     if edit:
         try:
             await msg.edit_text(text, reply_markup=kb)
@@ -181,6 +179,7 @@ async def choose_date_first(msg: types.Message, user_id: int | None = None, edit
             await msg.edit_reply_markup(reply_markup=kb)
     else:
         await msg.answer(text, reply_markup=kb)
+
 
 
 # Выбрали дату → показываем ВСЕ машины (wash+dry), только со свободными слотами
@@ -379,11 +378,16 @@ async def finalize(callback: types.CallbackQuery):
 # -----------------------------------------
 # Просмотр и отмена записей
 # -----------------------------------------
+# --- Отмена: показываем только будущие записи ---
 @router.message(F.text == "/cancel")
 async def show_user_bookings(msg: types.Message):
     user = get_user(msg.from_user.id)
     if not user:
         return await msg.answer("Сначала пройдите регистрацию с помощью /start")
+
+    now = now_local()
+    today = now.date().isoformat()
+    cur_hour = now.hour
 
     with get_conn() as conn:
         cur = conn.execute("""
@@ -391,13 +395,13 @@ async def show_user_bookings(msg: types.Message):
             FROM bookings b
             JOIN machines m ON b.machine_id = m.id
             WHERE b.user_id = ?
+              AND ((b.date > ?) OR (b.date = ? AND b.hour >= ?))
             ORDER BY b.date, b.hour
-        """, (user[0],))
+        """, (user[0], today, today, cur_hour))
         bookings = cur.fetchall()
 
     if not bookings:
         return await msg.answer("У вас нет активных записей.")
-
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text=f"{m} {d} {h}:00", callback_data=f"cancel_{bid}")]
         for bid, m, d, h in bookings
@@ -411,36 +415,36 @@ async def cancel_booking(callback: types.CallbackQuery):
         conn.execute("DELETE FROM bookings WHERE id=?", (booking_id,))
     await safe_edit(msg=callback.message, text="🗑️ Запись отменена.")
 
+# --- Мои записи: только будущие ---
 @router.message(F.text == "/mybookings")
 async def show_future_bookings(msg: types.Message):
     user = get_user(msg.from_user.id)
     if not user:
         return await msg.answer("Сначала пройдите регистрацию с помощью /start")
 
-    today = now_local().date()
+    now = now_local()
+    today = now.date().isoformat()
+    cur_hour = now.hour
+
     with get_conn() as conn:
         cur = conn.execute("""
             SELECT m.name, b.date, b.hour
             FROM bookings b
             JOIN machines m ON b.machine_id = m.id
-            WHERE b.user_id = ? AND date(b.date) >= ?
+            WHERE b.user_id = ?
+              AND ((b.date > ?) OR (b.date = ? AND b.hour >= ?))
             ORDER BY b.date, b.hour
-        """, (user[0], today.isoformat()))
-        bookings = cur.fetchall()
+        """, (user[0], today, today, cur_hour))
+        rows = cur.fetchall()
 
-    if not bookings:
+    if not rows:
         return await msg.answer("У вас нет активных записей.")
 
     text = "🧺 <b>Ваши записи:</b>\n\n"
-    for name, date, hour in bookings:
-        if isinstance(date, (datetime,)):
-            date_obj = date.strftime("%d.%m.%Y")
-        elif hasattr(date, "strftime"):
-            date_obj = date.strftime("%d.%m.%Y")
-        else:
-            date_obj = datetime.fromisoformat(str(date)).strftime("%d.%m.%Y")
-        text += f"📅 {date_obj} — {hour}:00\n• {name}\n\n"
-
+    for name, date_val, hour in rows:
+        # date_val может быть и str (SQLite), и date (Postgres)
+        ds = date_val.strftime("%d.%m.%Y") if hasattr(date_val, "strftime") else datetime.fromisoformat(str(date_val)).strftime("%d.%m.%Y")
+        text += f"📅 {ds} — {hour:02d}:00\n• {name}\n\n"
     await msg.answer(text, parse_mode="HTML")
 
 # Кнопки из главного меню

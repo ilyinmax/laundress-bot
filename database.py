@@ -266,13 +266,17 @@ from datetime import datetime, timedelta
 
 
 def ban_user(tg_id: int, reason: str = None, days: int = 7):
-    """Блокирует пользователя на указанное число дней (по умолчанию — 7)."""
     until = (datetime.now() + timedelta(days=days)).isoformat(timespec="seconds")
     with get_conn() as conn:
         conn.execute("""
-            INSERT OR REPLACE INTO banned (tg_id, reason, banned_until)
-            VALUES (?, ?, ?)
-        """, (tg_id, reason or "Без причины", until))
+            INSERT INTO banned (tg_id, reason, banned_until, banned_at)
+            VALUES (?, ?, ?, %s)
+            ON CONFLICT(tg_id) DO UPDATE SET
+                reason=excluded.reason,
+                banned_until=excluded.banned_until,
+                banned_at=%s
+        """.replace("%s", "now()" if DATABASE_URL else "excluded.banned_at"),
+        (tg_id, reason or "Без причины", until))
 
 
 def is_banned(tg_id: int) -> bool:
@@ -302,16 +306,19 @@ def unban_user(tg_id: int):
 
 
 def register_failed_attempt(tg_id: int) -> int:
-    """Увеличивает счётчик неудачных попыток (используется при регистрации)."""
     with get_conn() as conn:
         cur = conn.execute("SELECT count FROM failed_attempts WHERE tg_id=?", (tg_id,))
         row = cur.fetchone()
-        count = row[0] + 1 if row else 1
+        count = (row[0] if row else 0) + 1
         conn.execute("""
-            INSERT OR REPLACE INTO failed_attempts (tg_id, count, last_attempt)
+            INSERT INTO failed_attempts (tg_id, count, last_attempt)
             VALUES (?, ?, ?)
+            ON CONFLICT(tg_id) DO UPDATE SET
+                count=excluded.count,
+                last_attempt=excluded.last_attempt
         """, (tg_id, count, datetime.now().isoformat(timespec="seconds")))
     return count
+
 
 
 def reset_failed_attempts(tg_id: int):
