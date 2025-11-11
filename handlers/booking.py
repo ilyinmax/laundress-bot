@@ -82,12 +82,9 @@ def _count_day_slots(date_iso: str) -> tuple[int, int, int]:
 
 # /book — сначала выбираем ДАТУ (с количеством свободных/занятых)
 @router.message(F.text == "/book")
-async def choose_date_first(msg: types.Message, user_id: int | None = None):
+async def choose_date_first(msg: types.Message, user_id: int | None = None, edit: bool = False):
     uid = user_id or (msg.chat.id if getattr(msg, "chat", None) else msg.from_user.id)
     user = get_user(uid)
-    if not user:
-        return await msg.answer("Сначала пройдите регистрацию с помощью /start")
-
     if not user:
         return await msg.answer("Сначала пройдите регистрацию с помощью /start")
 
@@ -101,7 +98,6 @@ async def choose_date_first(msg: types.Message, user_id: int | None = None):
         d_iso = d.isoformat()
         machines_cnt, free_total, busy_total = _count_day_slots(d_iso)
         d_str = d.strftime("%d.%m")
-        # если машин нет — явно пишем
         if machines_cnt == 0:
             caption = f"📅 {d_str} — машин нет"
         else:
@@ -109,7 +105,16 @@ async def choose_date_first(msg: types.Message, user_id: int | None = None):
         days_buttons.append([InlineKeyboardButton(text=caption, callback_data=f"date_{d_iso}")])
 
     kb = InlineKeyboardMarkup(inline_keyboard=days_buttons)
-    await msg.answer("Выберите дату:", reply_markup=kb)
+    text = "Выберите дату:"
+
+    # если переходили по кнопке — редактируем текущее сообщение
+    if edit:
+        try:
+            await msg.edit_text(text, reply_markup=kb)
+        except TelegramBadRequest:
+            await msg.edit_reply_markup(reply_markup=kb)
+    else:
+        await msg.answer(text, reply_markup=kb)
 
 # Выбрали дату → показываем ВСЕ машины (wash+dry) с подсчётом свободно/занято
 @router.callback_query(F.data.startswith("date_"))
@@ -400,7 +405,7 @@ async def inactive_day(callback: types.CallbackQuery):
 @router.callback_query(F.data == "back_to_dates")
 async def back_to_dates(callback: types.CallbackQuery):
     await callback.answer()
-    await choose_date_first(callback.message, user_id=callback.from_user.id)
+    await choose_date_first(callback.message, user_id=callback.from_user.id, edit=True)
 
 @router.callback_query(F.data.startswith("back_to_machines_all_"))
 async def back_to_machines_all(callback: types.CallbackQuery):
