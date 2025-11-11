@@ -228,6 +228,107 @@ def init_db():
         for stmt in ddl:
             conn.execute(stmt)
 
+
+
+
+
+
+
+
+
+
+
+# === Бан пользователей и фильтрация ===
+
+def ensure_ban_tables():
+    """Создаёт таблицы для банов и попыток (если ещё нет)."""
+    with get_conn() as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS banned (
+                tg_id INTEGER UNIQUE NOT NULL,
+                reason TEXT,
+                banned_until TEXT,
+                banned_at TEXT DEFAULT (datetime('now'))
+            );
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS failed_attempts (
+                tg_id INTEGER UNIQUE NOT NULL,
+                count INTEGER DEFAULT 0,
+                last_attempt TEXT DEFAULT (datetime('now'))
+            );
+        """)
+
+ensure_ban_tables()
+
+
+from datetime import datetime, timedelta
+
+
+def ban_user(tg_id: int, reason: str = None, days: int = 7):
+    """Блокирует пользователя на указанное число дней (по умолчанию — 7)."""
+    until = (datetime.now() + timedelta(days=days)).isoformat(timespec="seconds")
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT OR REPLACE INTO banned (tg_id, reason, banned_until)
+            VALUES (?, ?, ?)
+        """, (tg_id, reason or "Без причины", until))
+
+
+def is_banned(tg_id: int) -> bool:
+    """Проверяет, забанен ли пользователь (и снимает бан, если срок истёк)."""
+    with get_conn() as conn:
+        cur = conn.execute("SELECT banned_until FROM banned WHERE tg_id=?", (tg_id,))
+        row = cur.fetchone()
+        if not row:
+            return False
+        until = row[0]
+        if not until:
+            return False
+        try:
+            dt_until = datetime.fromisoformat(until)
+            if datetime.now() > dt_until:
+                conn.execute("DELETE FROM banned WHERE tg_id=?", (tg_id,))
+                return False
+        except Exception:
+            pass
+        return True
+
+
+def unban_user(tg_id: int):
+    """Снимает бан вручную."""
+    with get_conn() as conn:
+        conn.execute("DELETE FROM banned WHERE tg_id=?", (tg_id,))
+
+
+def register_failed_attempt(tg_id: int) -> int:
+    """Увеличивает счётчик неудачных попыток (используется при регистрации)."""
+    with get_conn() as conn:
+        cur = conn.execute("SELECT count FROM failed_attempts WHERE tg_id=?", (tg_id,))
+        row = cur.fetchone()
+        count = row[0] + 1 if row else 1
+        conn.execute("""
+            INSERT OR REPLACE INTO failed_attempts (tg_id, count, last_attempt)
+            VALUES (?, ?, ?)
+        """, (tg_id, count, datetime.now().isoformat(timespec="seconds")))
+    return count
+
+
+def reset_failed_attempts(tg_id: int):
+    """Сбрасывает счётчик неудачных попыток."""
+    with get_conn() as conn:
+        conn.execute("DELETE FROM failed_attempts WHERE tg_id=?", (tg_id,))
+
+
+
+
+
+
+
+
+
+
+
 def bind_stub_user_to_real(tg_id, surname, room):
     # Ищем существующую запись по Фамилия+Комната (это “заглушка”)
     with get_conn() as conn:
@@ -291,16 +392,35 @@ def get_machines_by_type(type_):
         return cur.fetchall()
 
 def get_user_bookings_today(user_id, date_iso, machine_type):
-    # есть ли у пользователя запись на этот день по типу машины
+    """Есть ли у пользователя запись на этот день по типу машины.
+    Не даём записываться, если уже была запись и время слота прошло."""
+    from datetime import datetime, time
+    now = datetime.now().time()
+
     with get_conn() as conn:
         cur = conn.execute("""
-            SELECT b.id
+            SELECT b.hour
             FROM bookings b
             JOIN machines m ON m.id = b.machine_id
             WHERE b.user_id = ? AND b.date = ? AND m.type = ?
             LIMIT 1
         """, (user_id, date_iso, machine_type))
-        return cur.fetchone()
+        row = cur.fetchone()
+
+    if row:
+        # если запись есть — нельзя повторно
+        return True
+
+    # проверим, был ли уже слот сегодня в прошлом (чтобы не записывать повторно)
+    today = datetime.now().date().isoformat()
+    if date_iso == today:
+        # если текущий час > 9 (начало рабочего дня) — значит время уже шло
+        if now > time(9, 0):
+            # пользователь уже мог стираться, поэтому не даём повторно
+            return True
+
+    return False
+
 
 def get_free_hours(machine_id, date_iso):
     with get_conn() as conn:

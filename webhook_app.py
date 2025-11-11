@@ -8,6 +8,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from database import init_db
 from config import WASHING_MACHINES, DRYERS
 from database import add_machine, get_machines_by_type
+from scheduler import setup_scheduler
 
 def ensure_config_machines():
     # добавим стиралки, если их ещё нет
@@ -53,6 +54,7 @@ async def health(_):
 async def on_startup(app: web.Application):
     init_db()
     ensure_config_machines()
+    setup_scheduler()
     # сбрасываем хвост обновлений и ставим вебхук на наш публичный URL
     await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
     print(f"🌍 External URL: {BASE_URL}")

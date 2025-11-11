@@ -8,7 +8,13 @@ import pandas as pd
 from aiogram import Router, F, types, Bot
 from aiogram.filters import Command
 from database import (
-    init_db, ensure_user_by_surname_room, get_machine_id_by_name, create_booking
+    get_conn,
+    _b64d_try,
+    init_db,
+    ensure_user_by_surname_room,
+    get_machine_id_by_name,
+    create_booking,
+    ban_user,
 )
 import pandas as pd
 from datetime import datetime
@@ -142,10 +148,19 @@ async def show_stats(callback: types.CallbackQuery):
             (today.isoformat(), week_end.isoformat())
         ).fetchone()[0]
 
+        '''
         by_type = conn.execute("""
             SELECT m.type, COUNT(*) FROM bookings b
             JOIN machines m ON b.machine_id = m.id
             WHERE b.date >= ? AND b.date <= ?
+            GROUP BY m.type
+        """, (today.isoformat(), week_end.isoformat())).fetchall()
+        '''
+
+        by_type = conn.execute("""
+            SELECT m.type, COUNT(*) FROM bookings b
+            JOIN machines m ON b.machine_id = m.id
+            WHERE b.date BETWEEN ? AND ?
             GROUP BY m.type
         """, (today.isoformat(), week_end.isoformat())).fetchall()
 
@@ -171,7 +186,7 @@ async def show_admin_schedule(callback: types.CallbackQuery):
     date = callback.data.split("_")[2]
     with get_conn() as conn:
         cur = conn.execute("""
-            SELECT b.id, m.name, b.hour, u.surname, u.room
+            SELECT b.id, m.name, b.hour, u.surname, u.room, u.tg_id
             FROM bookings b
             JOIN machines m ON b.machine_id = m.id
             JOIN users u ON b.user_id = u.id
@@ -187,21 +202,28 @@ async def show_admin_schedule(callback: types.CallbackQuery):
     buttons = []
     current_machine = None
 
-    for booking_id, machine, hour, surname, room in records:
+    for booking_id, machine, hour, surname, room, tg_id in records:
         surname = _b64d_try(surname)
         room = _b64d_try(room)
         if machine != current_machine:
             text += f"\n<b>{machine}</b>\n"
             current_machine = machine
         text += f"  ⏰ {hour}:00 — {surname} (комн. {room})\n"
-        buttons.append([InlineKeyboardButton(
-            text=f"❌ {machine} {hour}:00 ({surname})",
-            callback_data=f"admin_del_{booking_id}_{date}"
-        )])
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"❌ Удалить {hour}:00 ({surname})",
+                callback_data=f"admin_del_{booking_id}_{date}"
+            ),
+            InlineKeyboardButton(
+                text=f"🚫 Бан",
+                callback_data=f"admin_ban_{tg_id}_{surname}_{room}"
+            )
+        ])
 
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
 
+'''
 # === Удаление конкретной записи ===
 @router.callback_query(F.data.startswith("admin_del_"))
 async def delete_booking(callback: types.CallbackQuery):
@@ -249,7 +271,32 @@ async def delete_booking(callback: types.CallbackQuery):
 
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+'''
 
+@router.callback_query(F.data.startswith("admin_del_"))
+async def delete_booking(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("🚫 Нет доступа.")
+    _, _, booking_id, date = callback.data.split("_")
+    booking_id = int(booking_id)
+
+    with get_conn() as conn:
+        conn.execute("DELETE FROM bookings WHERE id=?", (booking_id,))
+    await callback.answer("🗑️ Запись удалена!", show_alert=True)
+    await show_admin_schedule(callback)
+
+# --- Бан пользователя ---
+@router.callback_query(F.data.startswith("admin_ban_"))
+async def admin_ban_user(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("🚫 Нет доступа.")
+
+    _, _, tg_id, surname, room = callback.data.split("_", 4)
+    tg_id = int(tg_id)
+
+    ban_user(tg_id, reason=f"Бан из админ-панели ({surname}, комн. {room})", days=7)
+    await callback.answer(f"🚫 {surname} (комн. {room}) заблокирован на 7 дней!", show_alert=True)
+    await show_admin_schedule(callback)
 
 # === Экспорт всех записей в Excel ===
 @router.message(F.text == "/export")

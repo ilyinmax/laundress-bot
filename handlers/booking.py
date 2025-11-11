@@ -96,6 +96,29 @@ async def choose_date_first(msg: types.Message, user_id: int | None = None, edit
     for i in range(start_offset, start_offset + 3):
         d = today + timedelta(days=i)
         d_iso = d.isoformat()
+
+        # считаем свободные отдельно по типам машин
+        with get_conn() as conn:
+            cur = conn.execute("SELECT id, type FROM machines")
+            machines = cur.fetchall()
+
+        free_wash = 0
+        free_dry = 0
+        for mid, mtype in machines:
+            free = len(get_free_hours(mid, d_iso))
+            if mtype == "wash":
+                free_wash += (free > 0)
+            else:
+                free_dry += (free > 0)
+
+        d_str = d.strftime("%d.%m")
+        if not machines:
+            caption = f"📅 {d_str} — машин нет"
+        else:
+            caption = f"📅 {d_str} — 🧺 {free_wash} / 🌬️ {free_dry}"
+        days_buttons.append([InlineKeyboardButton(text=caption, callback_data=f"date_{d_iso}")])
+
+        """
         machines_cnt, free_total, busy_total = _count_day_slots(d_iso)
         d_str = d.strftime("%d.%m")
         if machines_cnt == 0:
@@ -103,6 +126,7 @@ async def choose_date_first(msg: types.Message, user_id: int | None = None, edit
         else:
             caption = f"📅 {d_str} • свободно: {free_total} / занято: {busy_total}"
         days_buttons.append([InlineKeyboardButton(text=caption, callback_data=f"date_{d_iso}")])
+        """
 
     kb = InlineKeyboardMarkup(inline_keyboard=days_buttons)
     text = "Выберите дату:"
@@ -292,12 +316,21 @@ async def finalize(callback: types.CallbackQuery):
     )
 
     # напоминание за час
+    # напоминание за 30 минут
     try:
-        if slot_dt - timedelta(hours=1) > now:
+        if slot_dt - timedelta(minutes=30) > now:
             bot: Bot = callback.bot
-            await schedule_reminder(bot, callback.from_user.id, machine_name, date_str, hour)
-    except Exception:
-        pass
+            await schedule_reminder(
+                bot,
+                callback.from_user.id,
+                machine_name,
+                date_str,
+                hour,
+                minutes_before=30,  # задаём вручную
+            )
+    except Exception as e:
+        print(f"[BOOKING] Ошибка при создании напоминания: {e}")
+
 
 # -----------------------------------------
 # Просмотр и отмена записей (как было)
