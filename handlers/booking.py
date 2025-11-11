@@ -96,42 +96,6 @@ def _free_count_for_machine_on_date(machine_id: int, date_iso: str) -> int:
 # =========================================================
 #        /book → Дата → Машина (все типы) → Время
 # =========================================================
-
-'''
-@router.message(F.text == "/book")
-async def choose_date_first(msg: types.Message, user_id: int | None = None, edit: bool = False):
-    uid = user_id or (msg.chat.id if getattr(msg, "chat", None) else msg.from_user.id)
-    user = get_user(uid)
-    if not user:
-        return await msg.answer("Сначала пройдите регистрацию с помощью /start")
-
-    now = now_local()
-    today = now.date()
-    # После 23:00 сегодняшние слоты уже неактуальны — начинаем с завтра
-    start_offset = 1 if now.hour >= 23 else 0
-
-    days_buttons = []
-    for i in range(start_offset, start_offset + 3):
-        d = today + timedelta(days=i)
-        d_iso = d.isoformat()
-
-        free_wash, free_dry = _free_per_type_for_date(d_iso)
-        d_str = d.strftime("%d.%m")
-        caption = f"📅 {d_str} — 🧺 {free_wash} / 🌬️ {free_dry}"
-        days_buttons.append([InlineKeyboardButton(text=caption, callback_data=f"date_{d_iso}")])
-
-    kb = InlineKeyboardMarkup(inline_keyboard=days_buttons)
-    text = "Выберите дату:"
-
-    if edit:
-        try:
-            await msg.edit_text(text, reply_markup=kb)
-        except TelegramBadRequest:
-            await msg.edit_reply_markup(reply_markup=kb)
-    else:
-        await msg.answer(text, reply_markup=kb)
-'''
-
 # --- /book: выбор даты (кнопки с корректным числом СВОБОДНЫХ машин) ---
 @router.message(F.text == "/book")
 async def choose_date_first(msg: types.Message, user_id: int | None = None, edit: bool = False):
@@ -148,26 +112,8 @@ async def choose_date_first(msg: types.Message, user_id: int | None = None, edit
     for i in range(start_offset, start_offset + 3):
         d = today + timedelta(days=i)
         d_iso = d.isoformat()
-
-        with get_conn() as conn:
-            cur = conn.execute("SELECT id, type FROM machines")
-            machines = cur.fetchall()
-
-        free_wash = 0
-        free_dry = 0
-        for mid, mtype in machines:
-            free = get_free_hours(mid, d_iso)
-            # учитываем только будущие часы именно для сегодня
-            if d == today:
-                free = [h for h in free if datetime.combine(d, time(h, tzinfo=TZ)) > now]
-            if len(free) > 0:
-                if mtype == "wash":
-                    free_wash += 1
-                else:
-                    free_dry += 1
-
-        d_str = d.strftime("%d.%m")
-        caption = f"📅 {d_str} — 🧺 {free_wash} / 🌬️ {free_dry}" if machines else f"📅 {d_str} — машин нет"
+        free_wash, free_dry = _free_per_type_for_date(d_iso)
+        caption = f"📅 {d.strftime('%d.%m')} — 🧺 {free_wash} / 🌬️ {free_dry}"
         days_buttons.append([InlineKeyboardButton(text=caption, callback_data=f"date_{d_iso}")])
 
     kb = InlineKeyboardMarkup(inline_keyboard=days_buttons)

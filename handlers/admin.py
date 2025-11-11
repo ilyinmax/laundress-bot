@@ -19,26 +19,24 @@ from database import (
 
 router = Router()
 
-# --- устойчивый is_admin ---
+# === Проверка на администратора ===
 def _normalize_admin_ids():
-    from config import ADMIN_IDS as RAW
-    if isinstance(RAW, (list, tuple, set)):
-        return {str(x).strip() for x in RAW if str(x).strip()}
-    # строка "id1,id2" или "[id1, id2]"
-    s = str(RAW).strip().strip("[]")
+    if isinstance(ADMIN_IDS, (list, tuple, set)):
+        return {str(x).strip() for x in ADMIN_IDS if str(x).strip()}
+    s = str(ADMIN_IDS).strip().strip("[]")
     parts = [p.strip() for p in s.split(",") if p.strip()]
     return {p for p in parts}
 
 ADMIN_SET = _normalize_admin_ids()
 
-def is_admin(user_id) -> bool:
+def is_admin(user_id: int) -> bool:
     try:
         return str(int(user_id)) in ADMIN_SET
     except Exception:
         return False
 
 
-# --- импорт из xlsx ---
+# === Импорт из Excel ===
 def import_bookings_from_xlsx(path: str) -> tuple[int, int, list[str]]:
     df = pd.read_excel(path)
     df["date_iso"] = pd.to_datetime(df["Дата"]).dt.date.astype(str)
@@ -80,6 +78,7 @@ async def cmd_import(msg: types.Message):
         return await msg.answer("🚫 Нет прав администратора.")
     await msg.answer("📥 Пришлите Excel-файл (.xlsx) с записями для импорта.")
 
+
 @router.message(F.document & (F.document.mime_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
 async def handle_xlsx(msg: types.Message, bot: Bot):
     if not is_admin(msg.from_user.id):
@@ -97,8 +96,10 @@ async def handle_xlsx(msg: types.Message, bot: Bot):
         text += f"\n⚠️ Замечания: {len(errors)} (см. логи на сервере)"
     await msg.answer(text)
 
-# === Главная команда администратора ===
-@router.message(F.text.in_({"/admin"}))
+
+# === Панель администратора ===
+@router.message(Command("admin"))
+@router.message(F.text == "/admin")
 async def admin_panel(msg: types.Message):
     if not is_admin(msg.from_user.id):
         return await msg.answer("🚫 У вас нет прав администратора.")
@@ -119,9 +120,13 @@ async def admin_panel(msg: types.Message):
         parse_mode="HTML"
     )
 
+
 # === Расписание ===
 @router.callback_query(F.data == "admin_menu_schedule")
 async def open_schedule(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("🚫 Нет доступа.")
+
     today = datetime.now().date()
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
@@ -134,6 +139,7 @@ async def open_schedule(callback: types.CallbackQuery):
         "📅 Выберите день для просмотра расписания:",
         reply_markup=kb
     )
+
 
 # === Статистика ===
 @router.callback_query(F.data == "admin_menu_stats")
@@ -162,11 +168,12 @@ async def show_stats(callback: types.CallbackQuery):
         f"Всего записей: <b>{total}</b>\n\n"
     )
     for t, count in by_type:
-        emoji = "🧺" if t == "wash" else "🌬"
+        emoji = "🧺" if t == "wash" else "🌬️"
         name = "Стиральные" if t == "wash" else "Сушилки"
         text += f"{emoji} {name}: <b>{count}</b>\n"
 
     await callback.message.edit_text(text, parse_mode="HTML")
+
 
 # === Просмотр расписания по дню ===
 @router.callback_query(F.data.startswith("admin_day_"))
@@ -207,12 +214,13 @@ async def show_admin_schedule(callback: types.CallbackQuery):
             ),
             InlineKeyboardButton(
                 text="🚫 Бан",
-                callback_data=f"admin_ban_{tg_id}"   # короткий надёжный колбэк
+                callback_data=f"admin_ban_{tg_id}"
             )
         ])
 
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
+
 
 # === Удаление конкретной записи ===
 @router.callback_query(F.data.startswith("admin_del_"))
@@ -227,63 +235,35 @@ async def delete_booking(callback: types.CallbackQuery):
         conn.execute("DELETE FROM bookings WHERE id=?", (booking_id,))
 
     await callback.answer("🗑️ Запись удалена!", show_alert=True)
+    await show_admin_schedule(callback)
 
-    # Перерисовываем список на ту же дату
-    with get_conn() as conn:
-        cur = conn.execute("""
-            SELECT b.id, m.name, b.hour, u.surname, u.room, u.tg_id
-            FROM bookings b
-            JOIN machines m ON b.machine_id = m.id
-            JOIN users u ON b.user_id = u.id
-            WHERE b.date = ?
-            ORDER BY m.name, b.hour
-        """, (date,))
-        records = cur.fetchall()
 
-    if not records:
-        return await callback.message.edit_text(f"📅 {date}: записей больше нет.")
-
-    text = f"🧺 <b>Записи на {date}</b>\n\n"
-    buttons = []
-    current_machine = None
-
-    for booking_id, machine, hour, surname, room, tg_id in records:
-        surname = _b64d_try(surname)
-        room = _b64d_try(room)
-        if machine != current_machine:
-            text += f"\n<b>{machine}</b>\n"
-            current_machine = machine
-        text += f"  ⏰ {hour}:00 — {surname} (комн. {room})\n"
-        buttons.append([
-            InlineKeyboardButton(
-                text=f"❌ Удалить {hour}:00 ({surname})",
-                callback_data=f"admin_del_{booking_id}_{date}"
-            ),
-            InlineKeyboardButton(
-                text="🚫 Бан",
-                callback_data=f"admin_ban_{tg_id}"
-            )
-        ])
-
-    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
-    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=kb)
-
-# --- Бан пользователя ---
+# === Бан пользователя ===
 @router.callback_query(F.data.startswith("admin_ban_"))
 async def admin_ban_user(callback: types.CallbackQuery):
     if not is_admin(callback.from_user.id):
         return await callback.answer("🚫 Нет доступа.")
-    tg_id = int(callback.data.split("_", 2)[2])
+
+    try:
+        tg_id = int(callback.data.split("_", 2)[2])
+    except Exception:
+        return await callback.answer("Ошибка: неверный формат ID.")
 
     ban_user(tg_id, reason="Бан из админ-панели", days=7)
     await callback.answer("🚫 Пользователь заблокирован на 7 дней.", show_alert=True)
-    # Сообщение списка оставляем как есть (обновление не обязательно)
     await show_admin_schedule(callback)
 
-# === Экспорт всех записей в Excel ===
-@router.message(F.text == "/export")
-async def export_bookings_cmd(msg: types.Message):
-    if not is_admin(msg.from_user.id):
+
+# === Экспорт записей ===
+@router.message(Command("export"))
+@router.callback_query(F.data == "admin_menu_export")
+async def export_bookings(event: types.Message | types.CallbackQuery):
+    msg = event.message if isinstance(event, types.CallbackQuery) else event
+    user_id = msg.from_user.id if msg.from_user else event.from_user.id
+
+    if not is_admin(user_id):
+        if isinstance(event, types.CallbackQuery):
+            return await event.answer("🚫 Нет доступа.")
         return await msg.answer("🚫 Нет доступа.")
 
     await msg.answer("📤 Формирую таблицу...")
@@ -319,12 +299,3 @@ async def export_bookings_cmd(msg: types.Message):
     wb.save(fname)
     await msg.answer_document(types.FSInputFile(fname), caption="📊 Экспорт всех записей")
     os.remove(fname)
-
-# Кнопка экспорта в панели
-@router.callback_query(F.data == "admin_menu_export")
-async def export_bookings(callback: types.CallbackQuery):
-    if not is_admin(callback.from_user.id):
-        return await callback.answer("🚫 Нет доступа.")
-    await export_bookings_cmd(callback.message)
-    # вернём панель
-    await admin_panel(callback.message)
