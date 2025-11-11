@@ -5,6 +5,8 @@ from datetime import datetime, timedelta
 from openpyxl import Workbook
 import os
 import pandas as pd
+from database import get_conn, unban_user  # unban_user уже есть в database.py
+
 
 from config import ADMIN_IDS
 from database import (
@@ -311,3 +313,82 @@ async def export_bookings(event: types.Message | types.CallbackQuery):
     wb.save(fname)
     await msg.answer_document(types.FSInputFile(fname), caption="📊 Экспорт всех записей")
     os.remove(fname)
+
+@router.message(Command("banned"))
+async def list_banned(msg: types.Message):
+    if not is_admin(msg.from_user.id):
+        return await msg.answer("🚫 Нет доступа.")
+
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT tg_id, reason, banned_until, banned_at
+            FROM banned
+            ORDER BY banned_at DESC
+        """).fetchall()
+
+    if not rows:
+        return await msg.answer("✅ Никто не забанен.")
+
+    text_lines = ["🚫 <b>Заблокированные</b>:\n"]
+    buttons = []
+    for tg_id, reason, until, _ in rows:
+        mention = f"<a href='tg://user?id={tg_id}'>{tg_id}</a>"
+        reason = reason or "—"
+        until  = until  or "—"
+        text_lines.append(f"• {mention} — до {until}\n  Причина: {reason}")
+        buttons.append([InlineKeyboardButton(text=f"Разбанить {tg_id}",
+                                             callback_data=f"unban_{tg_id}")])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await msg.answer("\n".join(text_lines), parse_mode="HTML", reply_markup=kb)
+
+@router.callback_query(F.data.startswith("unban_"))
+async def cb_unban(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("🚫 Нет доступа.")
+
+    try:
+        tg_id = int(callback.data.split("_", 1)[1])
+    except Exception:
+        return await callback.answer("Ошибка данных.", show_alert=True)
+
+    unban_user(tg_id)
+    await callback.answer("✅ Пользователь разбанен.", show_alert=True)
+
+    # Обновим список на экране
+    with get_conn() as conn:
+        rows = conn.execute("""
+            SELECT tg_id, reason, banned_until, banned_at
+            FROM banned
+            ORDER BY banned_at DESC
+        """).fetchall()
+
+    if not rows:
+        return await callback.message.edit_text("✅ Никто не забанен.")
+
+    text_lines = ["🚫 <b>Заблокированные</b>:\n"]
+    buttons = []
+    for tg_id2, reason, until, _ in rows:
+        mention = f"<a href='tg://user?id={tg_id2}'>{tg_id2}</a>"
+        reason = reason or "—"
+        until  = until  or "—"
+        text_lines.append(f"• {mention} — до {until}\n  Причина: {reason}")
+        buttons.append([InlineKeyboardButton(text=f"Разбанить {tg_id2}",
+                                             callback_data=f"unban_{tg_id2}")])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=buttons)
+    await callback.message.edit_text("\n".join(text_lines), parse_mode="HTML", reply_markup=kb)
+
+@router.message(Command("unban"))
+async def cmd_unban(msg: types.Message):
+    if not is_admin(msg.from_user.id):
+        return await msg.answer("🚫 Нет доступа.")
+    parts = msg.text.strip().split(maxsplit=1)
+    if len(parts) < 2:
+        return await msg.answer("Формат: /unban <tg_id>")
+    try:
+        tg_id = int(parts[1])
+    except ValueError:
+        return await msg.answer("tg_id должен быть числом.")
+    unban_user(tg_id)
+    await msg.answer("✅ Разбанено.")
