@@ -1,15 +1,30 @@
-name: Keep Render Alive
+name: Keep Render and Neon Alive
 
 on:
   schedule:
     - cron: "*/5 * * * *"    # каждые 5 минут (UTC)
-  workflow_dispatch:         # запуск вручную по кнопке
+  workflow_dispatch:
 
 jobs:
   ping:
     runs-on: ubuntu-latest
     steps:
-      - name: Ping health endpoint
+      - name: Keep Render alive
         run: curl -fsS -m 10 "$PING_URL"
         env:
           PING_URL: https://laundress-bot.onrender.com/health
+
+      - name: Keep Neon alive
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          pip install psycopg2-binary >/dev/null
+          python - <<'PY'
+          import psycopg2, os
+          conn = psycopg2.connect(os.environ["DATABASE_URL"])
+          cur = conn.cursor()
+          cur.execute("SELECT 1;")
+          cur.close()
+          conn.close()
+          print("✅ Neon pinged successfully")
+          PY
