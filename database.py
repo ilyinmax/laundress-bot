@@ -239,25 +239,47 @@ def init_db():
 
 
 # === Бан пользователей и фильтрация ===
-
 def ensure_ban_tables():
-    """Создаёт таблицы для банов и попыток (если ещё нет)."""
+    """Создаёт/мигрирует таблицы для банов и попыток (если ещё нет)."""
     with get_conn() as conn:
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS banned (
-                tg_id INTEGER UNIQUE NOT NULL,
-                reason TEXT,
-                banned_until TEXT,
-                banned_at TIMESTAMPTZ DEFAULT now()
-            );
-        """)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS failed_attempts (
-                tg_id INTEGER UNIQUE NOT NULL,
-                count INTEGER DEFAULT 0,
-                last_attempt TIMESTAMPTZ DEFAULT now()
-            );
-        """)
+        if DATABASE_URL:
+            # --- Postgres: используем BIGINT и мигрируем, если были INTEGER ---
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS banned (
+                    tg_id BIGINT UNIQUE NOT NULL,
+                    reason TEXT,
+                    banned_until TEXT,
+                    banned_at TIMESTAMPTZ DEFAULT now()
+                );
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS failed_attempts (
+                    tg_id BIGINT UNIQUE NOT NULL,
+                    count INTEGER DEFAULT 0,
+                    last_attempt TIMESTAMPTZ DEFAULT now()
+                );
+            """)
+            # миграция типов на BIGINT (безошибочно, если уже BIGINT)
+            conn.execute("ALTER TABLE banned ALTER COLUMN tg_id TYPE BIGINT USING tg_id::bigint;")
+            conn.execute("ALTER TABLE failed_attempts ALTER COLUMN tg_id TYPE BIGINT USING tg_id::bigint;")
+        else:
+            # --- SQLite: обычный INTEGER подходит (он 64-битный) ---
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS banned (
+                    tg_id INTEGER UNIQUE NOT NULL,
+                    reason TEXT,
+                    banned_until TEXT,
+                    banned_at TIMESTAMPTZ DEFAULT now()
+                );
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS failed_attempts (
+                    tg_id INTEGER UNIQUE NOT NULL,
+                    count INTEGER DEFAULT 0,
+                    last_attempt TIMESTAMPTZ DEFAULT now()
+                );
+            """)
+
 
 ensure_ban_tables()
 
