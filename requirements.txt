@@ -6,3 +6,4 @@ tzdata
 psycopg2-binary>=2.9
 pandas
 openpyxl
+SQLAlchemy>=2.0.0
