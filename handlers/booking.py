@@ -97,6 +97,7 @@ def _free_count_for_machine_on_date(machine_id: int, date_iso: str) -> int:
 #        /book → Дата → Машина (все типы) → Время
 # =========================================================
 
+'''
 @router.message(F.text == "/book")
 async def choose_date_first(msg: types.Message, user_id: int | None = None, edit: bool = False):
     uid = user_id or (msg.chat.id if getattr(msg, "chat", None) else msg.from_user.id)
@@ -129,6 +130,58 @@ async def choose_date_first(msg: types.Message, user_id: int | None = None, edit
             await msg.edit_reply_markup(reply_markup=kb)
     else:
         await msg.answer(text, reply_markup=kb)
+'''
+
+@router.message(F.text == "/book")
+async def choose_date_first(msg: types.Message, user_id: int | None = None, edit: bool = False):
+    uid = user_id or (msg.chat.id if getattr(msg, "chat", None) else msg.from_user.id)
+    user = get_user(uid)
+    if not user:
+        return await msg.answer("Сначала пройдите регистрацию с помощью /start")
+
+    now = now_local()
+    today = now.date()
+    start_offset = 1 if now.hour >= 23 else 0
+
+    days_buttons = []
+    for i in range(start_offset, start_offset + 3):
+        d = today + timedelta(days=i)
+        d_iso = d.isoformat()
+
+        free_wash = 0
+        free_dry = 0
+
+        with get_conn() as conn:
+            cur = conn.execute("SELECT id, type FROM machines")
+            machines = cur.fetchall()
+
+        for mid, mtype in machines:
+            hours = get_free_hours(mid, d_iso)
+            if d_iso == today.isoformat():
+                # для сегодняшнего дня — только будущие
+                hours = [h for h in hours if h > now.hour]
+            if not hours:
+                continue
+            if mtype == "wash":
+                free_wash += len(hours)
+            else:
+                free_dry += len(hours)
+
+        d_str = d.strftime("%d.%m")
+        caption = f"📅 {d_str} — 🧺 {free_wash} / 🌬️ {free_dry}"
+        days_buttons.append([InlineKeyboardButton(text=caption, callback_data=f"date_{d_iso}")])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=days_buttons)
+    text = "Выберите дату:"
+
+    if edit:
+        try:
+            await msg.edit_text(text, reply_markup=kb)
+        except TelegramBadRequest:
+            await msg.edit_reply_markup(reply_markup=kb)
+    else:
+        await msg.answer(text, reply_markup=kb)
+
 
 # Выбрали дату → показываем ВСЕ машины (wash+dry), только со свободными слотами
 @router.callback_query(F.data.startswith("date_"))
