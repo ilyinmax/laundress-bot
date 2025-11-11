@@ -248,7 +248,7 @@ def ensure_ban_tables():
                 tg_id INTEGER UNIQUE NOT NULL,
                 reason TEXT,
                 banned_until TEXT,
-                banned_at TEXT DEFAULT (datetime('now'))
+                banned_at TIMESTAMPTZ DEFAULT now()
             );
         """)
         conn.execute("""
