@@ -351,7 +351,12 @@ async def show_future_bookings(msg: types.Message):
 
     text = "🧺 <b>Ваши записи:</b>\n\n"
     for name, date, hour in bookings:
-        date_obj = datetime.fromisoformat(date).strftime("%d.%m.%Y")
+        if isinstance(date, (datetime,)):
+            date_obj = date.strftime("%d.%m.%Y")
+        elif hasattr(date, "strftime"):
+            date_obj = date.strftime("%d.%m.%Y")
+        else:
+            date_obj = datetime.fromisoformat(str(date)).strftime("%d.%m.%Y")
         text += f"📅 {date_obj} — {hour}:00\n• {name}\n\n"
 
     await msg.answer(text, parse_mode="HTML")
