@@ -1,10 +1,17 @@
-from aiogram import Router, types, F
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from datetime import datetime, timedelta
 from database import get_conn, _b64d_try
 from config import ADMIN_IDS
 from openpyxl import Workbook
 import os
+import pandas as pd
+from aiogram import Router, F, types, Bot
+from aiogram.filters import Command
+from database import (
+    init_db, ensure_user_by_surname_room, get_machine_id_by_name, create_booking
+)
+import pandas as pd
+from datetime import datetime
 
 router = Router()
 
@@ -15,7 +22,72 @@ def is_admin(user_id) -> bool:
     except Exception:
         return False
 
+def import_bookings_from_xlsx(path: str) -> tuple[int, int, list[str]]:
+    """Возвращает (добавлено, пропущено(дубликаты/ошибки), список ошибок)"""
+    df = pd.read_excel(path)
+    df["date_iso"] = pd.to_datetime(df["Дата"]).dt.date.astype(str)
+    df["hour"] = pd.to_datetime(df["Час"].astype(str)).dt.hour
 
+    inserted = 0
+    skipped = 0
+    errors: list[str] = []
+
+    for row in df.itertuples(index=False):
+        try:
+            surname = str(getattr(row, "Фамилия")).strip()
+            room = str(getattr(row, "Комната")).strip()
+            m_name = str(getattr(row, "Машина")).strip()
+            date_iso = str(getattr(row, "date_iso"))
+            hour = int(getattr(row, "hour"))
+
+            uid = ensure_user_by_surname_room(surname, room)
+            mid = get_machine_id_by_name(m_name)
+            if not mid:
+                errors.append(f"Нет машины в БД: {m_name}")
+                skipped += 1
+                continue
+
+            try:
+                create_booking(uid, mid, date_iso, hour)
+                inserted += 1
+            except Exception:
+                skipped += 1
+        except Exception as e:
+            skipped += 1
+            errors.append(f"Ошибка строки: {e}")
+
+    return inserted, skipped, errors
+
+
+@router.message(Command("import"))
+async def cmd_import(msg: types.Message):
+    if not is_admin(msg.from_user.id):
+        return await msg.answer("🚫 Нет прав администратора.")
+    await msg.answer("📥 Пришлите Excel-файл (.xlsx) с записями для импорта.")
+
+
+@router.message(F.document & (F.document.mime_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
+async def handle_xlsx(msg: types.Message, bot: Bot):
+    if not is_admin(msg.from_user.id):
+        return await msg.answer("🚫 Нет прав администратора.")
+
+    f = await bot.get_file(msg.document.file_id)
+    path = f"/tmp/{msg.document.file_unique_id}.xlsx"
+    await bot.download_file(f.file_path, path)
+
+    init_db()
+    added, skipped, errors = import_bookings_from_xlsx(path)
+
+    text = f"✅ Импорт завершён.\nДобавлено: {added}\nПропущено: {skipped}"
+    if errors:
+        text += f"\n⚠️ Замечания: {len(errors)} (см. логи на сервере)"
+        for e in errors[:20]:
+            print("[IMPORT]", e)
+
+    await msg.answer(text)
+
+
+# === Главная команда администратора ===
 @router.message(F.text.in_({"/admin"}))
 async def admin_panel(msg: types.Message):
     if not is_admin(msg.from_user.id):
@@ -89,24 +161,6 @@ async def show_stats(callback: types.CallbackQuery):
 
     await callback.message.edit_text(text, parse_mode="HTML")
 
-
-# === Главная команда администратора ===
-"""
-@router.message(F.text == "/admin")
-async def admin_panel(msg: types.Message):
-    if not is_admin(msg.from_user.id):
-        return await msg.answer("🚫 У вас нет прав администратора.")
-
-    today = datetime.now().date()
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(
-            text=(today + timedelta(days=i)).strftime("%d.%m.%Y"),
-            callback_data=f"admin_day_{(today + timedelta(days=i)).isoformat()}"
-        )]
-        for i in range(3)
-    ])
-    await msg.answer("📅 Выберите день для просмотра расписания:", reply_markup=kb)
-"""
 
 # === Просмотр расписания по дню ===
 @router.callback_query(F.data.startswith("admin_day_"))

@@ -3,6 +3,36 @@ import os
 import base64
 from datetime import datetime, timedelta
 from config import DB_PATH, WORKING_HOURS  # DB_PATH останется как локальный fallback
+import hashlib
+
+def _stub_tg_id(surname: str, room: str) -> int:
+    seed = f"{surname}|{room}".encode("utf-8")
+    val = int.from_bytes(hashlib.sha256(seed).digest()[:8], "big")
+    return -max(1, val % 10**11)  # отрицательный, но уникальный
+
+def ensure_user_by_surname_room(surname: str, room: str) -> int:
+    """Возвращает id пользователя. Если его нет — создаёт 'стаб' с фиктивным tg_id."""
+    with get_conn() as conn:
+        cur = conn.execute(
+            "SELECT id FROM users WHERE surname=? AND room=?",
+            (_b64e(surname), _b64e(room)),
+        )
+        row = cur.fetchone()
+        if row:
+            return row[0]
+        tg_stub = _stub_tg_id(surname, room)
+        conn.execute(
+            "INSERT INTO users (tg_id, surname, room) VALUES (?, ?, ?)",
+            (tg_stub, _b64e(surname), _b64e(room)),
+        )
+        cur = conn.execute("SELECT id FROM users WHERE tg_id=?", (tg_stub,))
+        return cur.fetchone()[0]
+
+def get_machine_id_by_name(name: str) -> int | None:
+    with get_conn() as conn:
+        cur = conn.execute("SELECT id FROM machines WHERE name=?", (name,))
+        row = cur.fetchone()
+        return row[0] if row else None
 
 # Определяем, есть ли внешний Postgres
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
