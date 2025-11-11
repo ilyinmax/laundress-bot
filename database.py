@@ -57,13 +57,17 @@ class _CursorWrapper:
 # ----- два backend’a: Postgres (Neon) и локальный SQLite fallback -----
 if DATABASE_URL:
     import psycopg2
+    from psycopg2 import pool
+
+    _pg_pool = pool.SimpleConnectionPool(1, 10, DATABASE_URL)  # 1–10 одновременных коннектов
+
 
     class _PgConn:
         def __init__(self):
-            # Neon требует SSL; в URI он уже есть (pooler host)
-            self._conn = psycopg2.connect(DATABASE_URL)
+            self._conn = _pg_pool.getconn()
             self._conn.autocommit = True
             self._opened = []
+
         def execute(self, sql: str, params=()):
             sql = _rewrite_insert_or_ignore(sql)
             sql = _rewrite_qmarks(sql)
@@ -72,15 +76,19 @@ if DATABASE_URL:
             w = _CursorWrapper(cur)
             self._opened.append(w)
             return w
+
         def commit(self):
-            # autocommit включён
-            pass
+            pass  # autocommit включён
+
         def close(self):
             for w in self._opened:
                 w.close()
-            self._conn.close()
+            _pg_pool.putconn(self._conn)
+
         def __enter__(self): return self
+
         def __exit__(self, exc_type, exc, tb): self.close()
+
 
     def get_conn():
         return _PgConn()
