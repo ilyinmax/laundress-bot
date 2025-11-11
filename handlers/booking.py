@@ -57,30 +57,46 @@ async def safe_edit(msg: Message, *, text: str | None = None,
             return None
         raise
 
-# -------- подсчёт слотов на дату (для текста кнопки даты) --------
-def _count_day_slots(date_iso: str) -> tuple[int, int, int]:
+# -------- вспомогательные подсчёты свободных --------
+def _free_per_type_for_date(date_iso: str) -> tuple[int, int]:
     """
-    Возвращает (machines_count, free_total, busy_total) на указанную дату.
-    Считаем как сумма по всем машинам: 15 слотов (9..23) минус занятые записи на дату.
+    Считает количество МАШИН с доступными слотами на дату.
+    Для 'сегодня' учитываем только будущие часы.
+    Возвращает: (free_wash, free_dry)
     """
-    with get_conn() as conn:
-        cur = conn.execute("SELECT id FROM machines")
-        machine_ids = [r[0] for r in cur.fetchall()]
-    if not machine_ids:
-        return 0, 0, 0
+    now = now_local()
+    today_iso = now.date().isoformat()
 
-    total_slots = len(machine_ids) * 15
     with get_conn() as conn:
-        cur = conn.execute("SELECT COUNT(*) FROM bookings WHERE date=?", (date_iso,))
-        busy_total = cur.fetchone()[0] or 0
-    free_total = max(total_slots - busy_total, 0)
-    return len(machine_ids), free_total, busy_total
+        cur = conn.execute("SELECT id, type FROM machines")
+        machines = cur.fetchall()
+
+    free_wash = 0
+    free_dry = 0
+    for mid, mtype in machines:
+        free = get_free_hours(mid, date_iso)
+        if date_iso == today_iso:
+            # учитываем только будущие часы
+            free = [h for h in free if h > now.hour]
+        if len(free) > 0:
+            if mtype == "wash":
+                free_wash += 1
+            else:
+                free_dry += 1
+
+    return free_wash, free_dry
+
+def _free_count_for_machine_on_date(machine_id: int, date_iso: str) -> int:
+    """Сколько свободных часов у конкретной машины на дату (для 'сегодня' — только будущие)."""
+    free = get_free_hours(machine_id, date_iso)
+    if date_iso == now_local().date().isoformat():
+        free = [h for h in free if h > now_local().hour]
+    return len(free)
 
 # =========================================================
 #        /book → Дата → Машина (все типы) → Время
 # =========================================================
 
-# /book — сначала выбираем ДАТУ (с количеством свободных/занятых)
 @router.message(F.text == "/book")
 async def choose_date_first(msg: types.Message, user_id: int | None = None, edit: bool = False):
     uid = user_id or (msg.chat.id if getattr(msg, "chat", None) else msg.from_user.id)
@@ -90,48 +106,22 @@ async def choose_date_first(msg: types.Message, user_id: int | None = None, edit
 
     now = now_local()
     today = now.date()
-    start_offset = 1 if now.hour >= 23 else 0  # после 23:00 убираем «сегодня»
+    # После 23:00 сегодняшние слоты уже неактуальны — начинаем с завтра
+    start_offset = 1 if now.hour >= 23 else 0
 
     days_buttons = []
     for i in range(start_offset, start_offset + 3):
         d = today + timedelta(days=i)
         d_iso = d.isoformat()
 
-        # считаем свободные отдельно по типам машин
-        with get_conn() as conn:
-            cur = conn.execute("SELECT id, type FROM machines")
-            machines = cur.fetchall()
-
-        free_wash = 0
-        free_dry = 0
-        for mid, mtype in machines:
-            free = len(get_free_hours(mid, d_iso))
-            if mtype == "wash":
-                free_wash += (free > 0)
-            else:
-                free_dry += (free > 0)
-
+        free_wash, free_dry = _free_per_type_for_date(d_iso)
         d_str = d.strftime("%d.%m")
-        if not machines:
-            caption = f"📅 {d_str} — машин нет"
-        else:
-            caption = f"📅 {d_str} — 🧺 {free_wash} / 🌬️ {free_dry}"
+        caption = f"📅 {d_str} — 🧺 {free_wash} / 🌬️ {free_dry}"
         days_buttons.append([InlineKeyboardButton(text=caption, callback_data=f"date_{d_iso}")])
-
-        """
-        machines_cnt, free_total, busy_total = _count_day_slots(d_iso)
-        d_str = d.strftime("%d.%m")
-        if machines_cnt == 0:
-            caption = f"📅 {d_str} — машин нет"
-        else:
-            caption = f"📅 {d_str} • свободно: {free_total} / занято: {busy_total}"
-        days_buttons.append([InlineKeyboardButton(text=caption, callback_data=f"date_{d_iso}")])
-        """
 
     kb = InlineKeyboardMarkup(inline_keyboard=days_buttons)
     text = "Выберите дату:"
 
-    # если переходили по кнопке — редактируем текущее сообщение
     if edit:
         try:
             await msg.edit_text(text, reply_markup=kb)
@@ -140,7 +130,7 @@ async def choose_date_first(msg: types.Message, user_id: int | None = None, edit
     else:
         await msg.answer(text, reply_markup=kb)
 
-# Выбрали дату → показываем ВСЕ машины (wash+dry) с подсчётом свободно/занято
+# Выбрали дату → показываем ВСЕ машины (wash+dry), только со свободными слотами
 @router.callback_query(F.data.startswith("date_"))
 async def choose_machine_for_date(callback: types.CallbackQuery):
     await callback.answer()
@@ -164,15 +154,21 @@ async def choose_machine_for_date(callback: types.CallbackQuery):
 
     rows = []
     for machine_id, machine_type, machine_name in machines:
-        free_hours = get_free_hours(machine_id, date)
-        free_cnt = len(free_hours)
-        busy_cnt = 15 - free_cnt  # 9..23 → 15 слотов
+        free_cnt = _free_count_for_machine_on_date(machine_id, date)
+        if free_cnt == 0:
+            continue  # полностью занятые не показываем
         emoji = "🧺" if machine_type == "wash" else "🌬️"
-        label = f"{emoji} {machine_name} — свободно: {free_cnt} / занято: {busy_cnt}"
+        label = f"{emoji} {machine_name} — свободно: {free_cnt}"
         rows.append([InlineKeyboardButton(text=label, callback_data=f"machine_{machine_id}_{date}")])
 
-    rows.append([InlineKeyboardButton(text="⬅️ К датам", callback_data="back_to_dates")])
+    # если всё занято — сообщим и дадим вернуться
+    if not rows:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ К датам", callback_data="back_to_dates")]
+        ])
+        return await safe_edit(callback.message, text=f"На {date} свободных машин нет.", reply_markup=kb)
 
+    rows.append([InlineKeyboardButton(text="⬅️ К датам", callback_data="back_to_dates")])
     kb = InlineKeyboardMarkup(inline_keyboard=rows)
     await safe_edit(callback.message, text=f"📅 {date}\nВыберите машину:", reply_markup=kb)
 
@@ -249,7 +245,7 @@ async def back_to_menu(callback: types.CallbackQuery):
     await callback.message.delete()
     await callback.message.answer("🏠 Главное меню:", reply_markup=main_menu)
 
-# Подтверждение брони (с проверкой «1 запись на тип в сутки»)
+# Подтверждение брони (ограничение: 1 запись на тип в сутки)
 @router.callback_query(F.data.startswith("book_"))
 async def finalize(callback: types.CallbackQuery):
     await callback.answer()
@@ -286,7 +282,6 @@ async def finalize(callback: types.CallbackQuery):
             return await safe_edit(msg=callback.message, text="Ошибка: машина не найдена.")
         machine_type, machine_name = row
 
-    # ограничение: 1 запись на тип (wash/dry) в сутки
     if get_user_bookings_today(user[0], date_str, machine_type):
         type_text = "стиральную машину" if machine_type == "wash" else "сушилку"
         return await safe_edit(
@@ -294,7 +289,6 @@ async def finalize(callback: types.CallbackQuery):
             text=f"⚠️ Вы уже записаны на {type_text} в этот день!\nМожно только одну запись на каждый тип машины в сутки.",
         )
 
-    # бронируем (уникальный индекс словит гонку)
     try:
         create_booking(user[0], machine_id, date_str, hour)
     except Exception:
@@ -304,7 +298,6 @@ async def finalize(callback: types.CallbackQuery):
             parse_mode="HTML",
         )
 
-    # подтверждение
     await safe_edit(
         msg=callback.message,
         text=(f"✅ Запись подтверждена!\n\n"
@@ -315,7 +308,6 @@ async def finalize(callback: types.CallbackQuery):
         parse_mode="HTML"
     )
 
-    # напоминание за час
     # напоминание за 30 минут
     try:
         if slot_dt - timedelta(minutes=30) > now:
@@ -326,14 +318,13 @@ async def finalize(callback: types.CallbackQuery):
                 machine_name,
                 date_str,
                 hour,
-                minutes_before=30,  # задаём вручную
+                minutes_before=30,
             )
-    except Exception as e:
-        print(f"[BOOKING] Ошибка при создании напоминания: {e}")
-
+    except Exception:
+        pass
 
 # -----------------------------------------
-# Просмотр и отмена записей (как было)
+# Просмотр и отмена записей
 # -----------------------------------------
 @router.message(F.text == "/cancel")
 async def show_user_bookings(msg: types.Message):
@@ -443,10 +434,7 @@ async def back_to_dates(callback: types.CallbackQuery):
 @router.callback_query(F.data.startswith("back_to_machines_all_"))
 async def back_to_machines_all(callback: types.CallbackQuery):
     await callback.answer()
-    # формат: back_to_machines_all_{YYYY-MM-DD}
-    # было split("_", 3) — ломалось: получали "all_{date}" одним куском
     parts = callback.data.split("_", 4)
-    # ожидаем: ['back','to','machines','all','YYYY-MM-DD']
     if len(parts) < 5:
         return await safe_edit(callback.message, text="⚠️ Неверные данные навигации.")
     date = parts[4]
@@ -463,11 +451,18 @@ async def back_to_machines_all(callback: types.CallbackQuery):
 
     rows = []
     for machine_id, machine_type, machine_name in machines:
-        free_cnt = len(get_free_hours(machine_id, date))
-        busy_cnt = 15 - free_cnt
+        free_cnt = _free_count_for_machine_on_date(machine_id, date)
+        if free_cnt == 0:
+            continue
         emoji = "🧺" if machine_type == "wash" else "🌬️"
-        label = f"{emoji} {machine_name} — свободно: {free_cnt} / занято: {busy_cnt}"
+        label = f"{emoji} {machine_name} — свободно: {free_cnt}"
         rows.append([InlineKeyboardButton(text=label, callback_data=f"machine_{machine_id}_{date}")])
+
+    if not rows:
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="⬅️ К датам", callback_data="back_to_dates")]
+        ])
+        return await safe_edit(callback.message, text=f"На {date} свободных машин нет.", reply_markup=kb)
 
     rows.append([InlineKeyboardButton(text="⬅️ К датам", callback_data="back_to_dates")])
     kb = InlineKeyboardMarkup(inline_keyboard=rows)
