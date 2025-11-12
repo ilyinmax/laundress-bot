@@ -6,6 +6,8 @@ from database import register_failed_attempt, reset_failed_attempts
 from keyboards import main_menu, start_menu
 from aiogram.types import ReplyKeyboardRemove
 from aiogram.filters import CommandStart
+from database import update_username
+
 import re
 
 
@@ -34,6 +36,7 @@ def is_valid_room(room: str) -> bool:
 async def start_cmd(msg: types.Message, state: FSMContext):
     await state.clear()
     tg_id = msg.from_user.id
+    update_username(msg.from_user.id, msg.from_user.username)
 
     if is_banned(tg_id):
         return await msg.answer("🚫 Вы заблокированы на 7 дней за нарушение правил. Попробуйте позже.")

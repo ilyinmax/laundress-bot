@@ -6,6 +6,8 @@ from openpyxl import Workbook
 import os
 import pandas as pd
 from database import get_conn, unban_user  # unban_user уже есть в database.py
+from aiogram.filters import Command
+from database import ban_user, tg_id_by_username
 
 
 from config import ADMIN_IDS
@@ -392,3 +394,59 @@ async def cmd_unban(msg: types.Message):
         return await msg.answer("tg_id должен быть числом.")
     unban_user(tg_id)
     await msg.answer("✅ Разбанено.")
+
+
+
+@router.message(Command("ban"))
+async def cmd_ban(msg: types.Message):
+    if not is_admin(msg.from_user.id):
+        return await msg.answer("🚫 Нет прав администратора.")
+
+    text = (msg.text or "").strip()
+    parts = text.split(maxsplit=1)
+    args = parts[1] if len(parts) > 1 else ""
+
+    target_id = None
+    days = 7
+    reason = "Бан по команде /ban"
+
+    # 1) Если это reply — берём пользователя из ответа
+    if msg.reply_to_message:
+        target_id = msg.reply_to_message.from_user.id
+        if args:
+            a = args.split()
+            if a and a[0].isdigit():
+                days = int(a[0]); reason = " ".join(a[1:]) or reason
+            else:
+                reason = args or reason
+
+    # 2) Иначе парсим аргументы: @username / tg_id [дней] [причина]
+    else:
+        if not args:
+            return await msg.answer("Формат: /ban @username [дней] [причина]\nЛибо ответом: /ban [дней] [причина]")
+        a = args.split()
+        first = a[0]
+
+        # @username
+        if first.startswith("@"):
+            target_id = tg_id_by_username(first)
+            if not target_id:
+                return await msg.answer("❗ Не нашёл такого username среди пользователей бота.")
+            a = a[1:]
+
+        # tg_id
+        elif first.lstrip("-").isdigit():
+            target_id = int(first)
+            a = a[1:]
+
+        else:
+            return await msg.answer("Формат: /ban @username [дней] [причина]")
+
+        if a and a[0].isdigit():
+            days = int(a[0]); a = a[1:]
+        if a:
+            reason = " ".join(a)
+
+    # Финальный бан
+    ban_user(int(target_id), reason=reason, days=days)
+    await msg.answer(f"🚫 Забанен: <code>{target_id}</code> на {days} дн.\nПричина: {reason}", parse_mode="HTML")

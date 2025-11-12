@@ -227,15 +227,7 @@ def init_db():
     with get_conn() as conn:
         for stmt in ddl:
             conn.execute(stmt)
-
-
-
-
-
-
-
-
-
+    ensure_username_column()
 
 
 # === Бан пользователей и фильтрация ===
@@ -472,3 +464,38 @@ def cleanup_old_bookings():
     cutoff = today - timedelta(days=1)
     with get_conn() as conn:
         conn.execute("DELETE FROM bookings WHERE date < ?", (cutoff.isoformat(),))
+
+
+
+
+
+
+# --- usernames support ---
+def ensure_username_column():
+    with get_conn() as conn:
+        if DATABASE_URL:
+            conn.execute("ALTER TABLE users ADD COLUMN IF NOT EXISTS username TEXT;")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users (LOWER(username));")
+        else:
+            # SQLite: добавляем колонку, если её нет
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(users)").fetchall()]
+            if "username" not in cols:
+                conn.execute("ALTER TABLE users ADD COLUMN username TEXT;")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_users_username ON users (username);")
+
+def update_username(tg_id: int, username: str | None):
+    if not username:
+        return
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT INTO users (tg_id, username)
+            VALUES (?, ?)
+            ON CONFLICT(tg_id) DO UPDATE SET username=excluded.username
+        """, (tg_id, username))
+
+def tg_id_by_username(username: str) -> int | None:
+    u = username.lstrip("@")
+    with get_conn() as conn:
+        cur = conn.execute("SELECT tg_id FROM users WHERE LOWER(username)=LOWER(?) LIMIT 1", (u,))
+        row = cur.fetchone()
+        return row[0] if row else None
