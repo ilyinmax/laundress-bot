@@ -412,6 +412,7 @@ def get_machines_by_type(type_):
         cur = conn.execute("SELECT id, type, name FROM machines WHERE type=?", (type_,))
         return cur.fetchall()
 
+'''
 def get_user_bookings_today(user_id, date_iso, machine_type):
     """Есть ли у пользователя запись на этот день по типу машины.
     Не даём записываться, если уже была запись и время слота прошло."""
@@ -441,6 +442,18 @@ def get_user_bookings_today(user_id, date_iso, machine_type):
             return True
 
     return False
+'''
+def get_user_bookings_today(user_id, date_iso, machine_type):
+    """True, если у пользователя уже есть запись на этот день по данному типу машины."""
+    with get_conn() as conn:
+        row = conn.execute("""
+            SELECT 1
+            FROM bookings b
+            JOIN machines m ON m.id = b.machine_id
+            WHERE b.user_id = ? AND b.date = ? AND m.type = ?
+            LIMIT 1
+        """, (user_id, date_iso, machine_type)).fetchone()
+    return bool(row)
 
 
 def get_free_hours(machine_id, date_iso):
