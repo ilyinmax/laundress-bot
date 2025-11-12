@@ -4,6 +4,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from datetime import datetime, timedelta
 from openpyxl import Workbook
 import os
+from database import _b64d_try
 import pandas as pd
 from database import get_conn, unban_user  # unban_user уже есть в database.py
 from aiogram.filters import Command
@@ -58,7 +59,7 @@ def is_admin(user_id: int | str) -> bool:
 async def _render_schedule(message: types.Message, date: str):
     with get_conn() as conn:
         cur = conn.execute("""
-            SELECT b.id, m.name, b.hour, u.surname, u.room, u.tg_id
+            SELECT b.id, m.name, b.hour, u.surname, u.room, u.tg_id, u.username
             FROM bookings b
             JOIN machines m ON b.machine_id = m.id
             JOIN users u ON b.user_id = u.id
@@ -73,6 +74,7 @@ async def _render_schedule(message: types.Message, date: str):
     text = f"🧺 <b>Записи на {date}</b>\n\n"
     buttons = []
     current_machine = None
+    '''
     for booking_id, machine, hour, surname, room, tg_id in records:
         surname = _b64d_try(surname); room = _b64d_try(room)
         if machine != current_machine:
@@ -80,6 +82,22 @@ async def _render_schedule(message: types.Message, date: str):
         text += f"  ⏰ {hour}:00 — {surname} (комн. {room})\n"
         buttons.append([
             InlineKeyboardButton(text=f"❌ Удалить {hour}:00 ({surname})",
+                                 callback_data=f"admin_del_{booking_id}_{date}"),
+            InlineKeyboardButton(text="🚫 Бан",
+                                 callback_data=f"admin_ban_{tg_id}_{date}")
+        ])
+    '''
+    for booking_id, machine, hour, surname, room, tg_id, username in records:
+        surname = _b64d_try(surname)
+        room = _b64d_try(room)
+        who = surname or (('@' + username) if username else f'id:{tg_id}')
+        room_txt = room or "—"
+        if machine != current_machine:
+            text += f"\n<b>{machine}</b>\n";
+            current_machine = machine
+        text += f"  ⏰ {hour:02d}:00 — {who} (комн. {room_txt})\n"
+        buttons.append([
+            InlineKeyboardButton(text=f"❌ Удалить {hour:02d}:00 ({who})",
                                  callback_data=f"admin_del_{booking_id}_{date}"),
             InlineKeyboardButton(text="🚫 Бан",
                                  callback_data=f"admin_ban_{tg_id}_{date}")
