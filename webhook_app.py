@@ -1,14 +1,12 @@
 # webhook_app.py — aiogram v3 + aiohttp, Web Service на Render
 import os
-import aiohttp
 from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
-from database import init_db
+from database import init_db, add_machine, get_machines_by_type
 from config import WASHING_MACHINES, DRYERS
-from database import add_machine, get_machines_by_type
-from scheduler import setup_scheduler
+from scheduler import setup_scheduler, rebuild_reminders_for_horizon  # важно
 
 def ensure_config_machines():
     # добавим стиралки, если их ещё нет
@@ -55,6 +53,7 @@ async def on_startup(app: web.Application):
     init_db()
     ensure_config_machines()
     setup_scheduler()
+    await rebuild_reminders_for_horizon(bot, hours=48, minutes_before=30)
     # сбрасываем хвост обновлений и ставим вебхук на наш публичный URL
     await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
     print(f"🌍 External URL: {BASE_URL}")

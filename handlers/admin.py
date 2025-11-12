@@ -1,59 +1,34 @@
+# admin.py — импортЫ
+import os
+import asyncio
+from datetime import datetime, timedelta
+
+import pandas as pd
+from openpyxl import Workbook
 from aiogram import Router, F, types, Bot
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from datetime import datetime, timedelta
-from openpyxl import Workbook
-import os
-from database import _b64d_try
-import pandas as pd
-from database import get_conn, unban_user  # unban_user уже есть в database.py
-from aiogram.filters import Command
-from database import ban_user, tg_id_by_username
-from database import (
-    ensure_user_by_surname_room,
-    get_free_hours,
-    get_user_bookings_today,
-    create_booking,
-)
 
-from config import ADMIN_IDS
+# aiogram v3:
+from aiogram.exceptions import TelegramRetryAfter
+# (если вдруг у тебя aiogram v2, замени строку выше на:
+# from aiogram.utils.exceptions import RetryAfter as TelegramRetryAfter)
+
 from database import (
-    get_conn,
-    _b64d_try,
-    init_db,
-    ensure_user_by_surname_room,
-    get_machine_id_by_name,
-    create_booking,
-    ban_user,
+    get_conn, _b64d_try, init_db,
+    ensure_user_by_surname_room, get_machine_id_by_name, create_booking,
+    ban_user, unban_user, tg_id_by_username,
+    get_user_bookings_today, get_free_hours, is_admin, get_incomplete_users,
 )
+from config import ADMIN_IDS
+
+from zoneinfo import ZoneInfo
+from config import TIMEZONE
+from aiogram.types import FSInputFile  # для экспорта
+
+TZ = ZoneInfo(TIMEZONE)
 
 router = Router()
-
-# === Проверка на администратора ===
-def _normalize_admin_ids():
-    # ADMIN_IDS может быть: списком/множеством, строкой "123,456", строкой "['123','456']" и т.п.
-    if isinstance(ADMIN_IDS, (list, tuple, set)):
-        raw = ADMIN_IDS
-    else:
-        s = str(ADMIN_IDS).strip()
-        if s.startswith("[") and s.endswith("]"):
-            s = s[1:-1]
-        raw = [part for part in s.split(",") if part.strip()]
-
-    norm = set()
-    for x in raw:
-        t = str(x).strip().strip("'").strip('"')   # убираем кавычки и пробелы
-        if t:
-            norm.add(t)
-    return norm
-
-ADMIN_SET = _normalize_admin_ids()
-
-def is_admin(user_id: int | str) -> bool:
-    try:
-        return str(int(user_id)) in ADMIN_SET
-    except Exception:
-        return False
 
 
 async def _render_schedule(message: types.Message, date: str):
@@ -74,24 +49,10 @@ async def _render_schedule(message: types.Message, date: str):
     text = f"🧺 <b>Записи на {date}</b>\n\n"
     buttons = []
     current_machine = None
-    '''
-    for booking_id, machine, hour, surname, room, tg_id in records:
-        surname = _b64d_try(surname); room = _b64d_try(room)
-        if machine != current_machine:
-            text += f"\n<b>{machine}</b>\n"; current_machine = machine
-        text += f"  ⏰ {hour}:00 — {surname} (комн. {room})\n"
-        buttons.append([
-            InlineKeyboardButton(text=f"❌ Удалить {hour}:00 ({surname})",
-                                 callback_data=f"admin_del_{booking_id}_{date}"),
-            InlineKeyboardButton(text="🚫 Бан",
-                                 callback_data=f"admin_ban_{tg_id}_{date}")
-        ])
-    '''
     for booking_id, machine, hour, surname, room, tg_id, username in records:
         surname = _b64d_try(surname)
         room = _b64d_try(room)
-
-        # Если есть фамилия и username — выводим оба
+        who = None
         if surname and username:
             who = f"{surname} (@{username})"
         elif surname:
@@ -100,25 +61,18 @@ async def _render_schedule(message: types.Message, date: str):
             who = f"@{username}"
         else:
             who = f"id:{tg_id}"
-
-        # Комната
-        room_txt = room if room else "—"
+        room_txt = room or "—"
 
         if machine != current_machine:
             text += f"\n<b>{machine}</b>\n"
             current_machine = machine
 
         text += f"  ⏰ {hour:02d}:00 — {who} (комн. {room_txt})\n"
-
         buttons.append([
-            InlineKeyboardButton(
-                text=f"❌ Удалить {hour:02d}:00 ({who})",
-                callback_data=f"admin_del_{booking_id}_{date}"
-            ),
-            InlineKeyboardButton(
-                text="🚫 Бан",
-                callback_data=f"admin_ban_{tg_id}_{date}"
-            )
+            InlineKeyboardButton(text=f"❌ Удалить {hour:02d}:00 ({who})",
+                                 callback_data=f"admin_del_{booking_id}_{date}"),
+            InlineKeyboardButton(text="🚫 Бан",
+                                 callback_data=f"admin_ban_{tg_id}_{date}")
         ])
 
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -213,10 +167,11 @@ async def admin_panel(msg: types.Message):
 # === Расписание ===
 @router.callback_query(F.data == "admin_menu_schedule")
 async def open_schedule(callback: types.CallbackQuery):
+    await callback.answer()  # ← ранний ACK
     if not is_admin(callback.from_user.id):
-        return await callback.answer("🚫 Нет доступа.")
+        return await callback.answer("🚫 Нет доступа.", show_alert=True)
 
-    today = datetime.now().date()
+    today = datetime.now(TZ).date()  # ← локальная дата
     kb = InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(
             text=(today + timedelta(days=i)).strftime("%d.%m.%Y"),
@@ -230,13 +185,15 @@ async def open_schedule(callback: types.CallbackQuery):
     )
 
 
+
 # === Статистика ===
 @router.callback_query(F.data == "admin_menu_stats")
 async def show_stats(callback: types.CallbackQuery):
+    await callback.answer()  # ← ACK
     if not is_admin(callback.from_user.id):
-        return await callback.answer("🚫 Нет доступа.")
+        return await callback.answer("🚫 Нет доступа.", show_alert=True)
 
-    today = datetime.now().date()
+    today = datetime.now(TZ).date()       # ← TZ
     week_end = today + timedelta(days=6)
 
     with get_conn() as conn:
@@ -267,33 +224,45 @@ async def show_stats(callback: types.CallbackQuery):
 # === Просмотр расписания по дню ===
 @router.callback_query(F.data.startswith("admin_day_"))
 async def show_admin_schedule(callback: types.CallbackQuery):
+    await callback.answer()  # ← ACK
     if not is_admin(callback.from_user.id):
-        return await callback.answer("🚫 Нет доступа.")
-    date = callback.data.split("_", 2)[2]
+        return await callback.answer("🚫 Нет доступа.", show_alert=True)
+
+    parts = callback.data.split("_", 2)
+    if len(parts) < 3:
+        return await callback.answer("Некорректные данные даты.", show_alert=True)
+    date = parts[2]
     await _render_schedule(callback.message, date)
 
 
 # === Удаление конкретной записи ===
 @router.callback_query(F.data.startswith("admin_del_"))
 async def delete_booking(callback: types.CallbackQuery):
+    await callback.answer()  # ← ACK
     if not is_admin(callback.from_user.id):
-        return await callback.answer("🚫 Нет доступа.")
+        return await callback.answer("🚫 Нет доступа.", show_alert=True)
 
-    _, _, booking_id, date = callback.data.split("_")
-    booking_id = int(booking_id)
+    parts = callback.data.split("_", 3)
+    if len(parts) < 4:
+        return await callback.answer("Ошибка данных.", show_alert=True)
+    _, _, booking_id, date = parts
+    try:
+        booking_id = int(booking_id)
+    except ValueError:
+        return await callback.answer("Неверный ID записи.", show_alert=True)
 
     with get_conn() as conn:
         conn.execute("DELETE FROM bookings WHERE id=?", (booking_id,))
 
-    await callback.answer("🗑️ Запись удалена!", show_alert=True)
     await _render_schedule(callback.message, date)
 
 
 # === Бан пользователя ===
 @router.callback_query(F.data.startswith("admin_ban_"))
 async def admin_ban_user(callback: types.CallbackQuery):
+    await callback.answer()  # ← ACK
     if not is_admin(callback.from_user.id):
-        return await callback.answer("🚫 Нет доступа.")
+        return await callback.answer("🚫 Нет доступа.", show_alert=True)
 
     try:
         _, _, tg_id_str, date = callback.data.split("_", 3)
@@ -302,7 +271,6 @@ async def admin_ban_user(callback: types.CallbackQuery):
         return await callback.answer("Ошибка данных бан-кнопки.", show_alert=True)
 
     ban_user(tg_id, reason="Бан из админ-панели", days=7)
-    await callback.answer("🚫 Пользователь заблокирован на 7 дней.", show_alert=True)
     await _render_schedule(callback.message, date)
 
 
@@ -311,9 +279,9 @@ async def admin_ban_user(callback: types.CallbackQuery):
 @router.message(Command("export"))
 @router.callback_query(F.data == "admin_menu_export")
 async def export_bookings(event: types.Message | types.CallbackQuery):
-    # корректно извлекаем actor и объект сообщения для ответа
     if isinstance(event, types.CallbackQuery):
-        user_id = event.from_user.id         # ← именно кликающий
+        await event.answer()  # ← ACK
+        user_id = event.from_user.id
         msg = event.message
     else:
         user_id = event.from_user.id
@@ -321,7 +289,7 @@ async def export_bookings(event: types.Message | types.CallbackQuery):
 
     if not is_admin(user_id):
         if isinstance(event, types.CallbackQuery):
-            return await event.answer("🚫 Нет доступа.")
+            return await event.answer("🚫 Нет доступа.", show_alert=True)
         return await msg.answer("🚫 Нет доступа.")
 
     await msg.answer("📤 Формирую таблицу...")
@@ -353,10 +321,14 @@ async def export_bookings(event: types.Message | types.CallbackQuery):
         width = max(len(str(c.value)) if c.value else 0 for c in col) + 2
         ws.column_dimensions[col[0].column_letter].width = width
 
-    fname = f"bookings_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.xlsx"
+    # вместо локального имени — безопаснее в /tmp
+    fname = f"/tmp/bookings_{datetime.now(TZ).strftime('%Y-%m-%d_%H-%M-%S')}.xlsx"
     wb.save(fname)
-    await msg.answer_document(types.FSInputFile(fname), caption="📊 Экспорт всех записей")
-    os.remove(fname)
+    await msg.answer_document(FSInputFile(fname), caption="📊 Экспорт всех записей")
+    try:
+        os.remove(fname)
+    except Exception:
+        pass
 
 @router.message(Command("banned"))
 async def list_banned(msg: types.Message):
@@ -388,8 +360,9 @@ async def list_banned(msg: types.Message):
 
 @router.callback_query(F.data.startswith("unban_"))
 async def cb_unban(callback: types.CallbackQuery):
+    await callback.answer()  # ← ACK
     if not is_admin(callback.from_user.id):
-        return await callback.answer("🚫 Нет доступа.")
+        return await callback.answer("🚫 Нет доступа.", show_alert=True)
 
     try:
         tg_id = int(callback.data.split("_", 1)[1])
@@ -565,3 +538,45 @@ async def cmd_machines(msg: types.Message):
     for mid, t, name in rows:
         lines.append(f"#{mid} — {name} ({'стиралка' if t=='wash' else 'сушилка'})")
     await msg.answer("\n".join(lines))
+
+
+@router.message(Command("notify_incomplete"))
+async def notify_incomplete(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return await message.answer("🚫 Нет доступа.")
+
+    users = get_incomplete_users()
+    if not users:
+        return await message.answer("Все пользователи уже заполнили профиль ✅")
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="Заполнить профиль", callback_data="fill_profile")]
+    ])
+    text = (
+        "Привет! Чтобы твоя запись в прачечную корректно отображалась, "
+        "необходимо завершить регистрацию.\n\n"
+        "Нажмите «Заполнить профиль» ниже 👇"
+    )
+
+    sent, skipped = 0, 0
+    for tg_id, _ in users:
+        try:
+            await message.bot.send_message(
+                tg_id, text,
+                reply_markup=kb, parse_mode="HTML", disable_web_page_preview=True
+            )
+            sent += 1
+            await asyncio.sleep(0.05)  # лёгкий троттлинг
+        except TelegramRetryAfter as e:
+            await asyncio.sleep(e.retry_after + 1)
+            try:
+                await message.bot.send_message(
+                    tg_id, text, reply_markup=kb, parse_mode="HTML", disable_web_page_preview=True
+                )
+                sent += 1
+            except Exception:
+                skipped += 1
+        except Exception:
+            skipped += 1
+
+    await message.answer(f"Готово. Отправлено: {sent}, не доставлено: {skipped}.")

@@ -4,19 +4,19 @@ from aiogram.exceptions import TelegramBadRequest
 
 from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
-from database import is_banned, get_conn
 
-
-from config import TIMEZONE
+from config import TIMEZONE, WORKING_HOURS
 from keyboards import main_menu
 from scheduler import schedule_reminder
-from database import (
-    get_conn,
-    get_user,
-    get_user_bookings_today,
-    get_free_hours,
-    create_booking,
-)
+from database import is_banned, get_conn, get_user, get_user_bookings_today, get_free_hours, create_booking
+from sqlite3 import IntegrityError # для SQLite
+
+# Для Postgres: корректно подхватить UniqueViolation, а без psycopg2 — сделать безопасную заглушку-класс
+try:
+    from psycopg2.errors import UniqueViolation  # type: ignore
+except Exception:
+    class UniqueViolation(Exception):
+        pass
 
 TZ = ZoneInfo(TIMEZONE)
 
@@ -120,8 +120,8 @@ async def choose_date_first(msg: types.Message, user_id: int | None = None, edit
         if reason: text += f"\nПричина: {reason}"
         return await msg.answer(text)
     user = get_user(uid)
-    if not user:
-        return await msg.answer("Сначала пройдите регистрацию с помощью /start")
+    if not user or not (user[2] and user[3]):
+        return await msg.answer("Сначала завершите регистрацию: /start → фамилия и номер комнаты.")
 
     now = now_local()
     today = now.date()
@@ -214,7 +214,7 @@ async def choose_hour(callback: types.CallbackQuery):
     machine_type, machine_name = row
 
     free_hours = set(get_free_hours(machine_id, date))
-    all_hours = range(9, 24)
+    all_hours = WORKING_HOURS
 
     now = now_local()
     selected_date = datetime.fromisoformat(date).date()
@@ -276,14 +276,14 @@ async def finalize(callback: types.CallbackQuery):
         _, machine_id_str, date_str, hour_str = callback.data.split("_")
         machine_id, hour = int(machine_id_str), int(hour_str)
     except Exception:
-        return await safe_edit(callback.message, "Некорректные данные слота. Откройте /book заново.")
+        return await safe_edit(callback.message, text="Некорректные данные слота. Откройте /book заново.")
 
     user = get_user(callback.from_user.id)
     if is_banned(callback.from_user.id):
         return await safe_edit(callback.message, "🚫 Вы заблокированы и не можете записываться.")
 
-    if not user:
-        return await safe_edit(callback.message, "Сначала пройдите регистрацию с помощью /start")
+    if not user or not (user[2] and user[3]):
+        return await safe_edit(callback.message, "Сначала завершите регистрацию: /start → фамилия и комната.")
 
     try:
         sel_date = datetime.fromisoformat(date_str).date()
@@ -311,12 +311,37 @@ async def finalize(callback: types.CallbackQuery):
 
     try:
         create_booking(user[0], machine_id, date_str, hour)
+    except (IntegrityError, UniqueViolation):
+        # проверим, не ваша ли это запись
+        with get_conn() as conn:
+            mine = conn.execute("""
+                                SELECT 1
+                                FROM bookings
+                                WHERE user_id = ?
+                                  AND machine_id = ?
+                                  AND date =?
+                                  AND hour =?
+                                """, (user[0], machine_id, date_str, hour)).fetchone()
+        if mine:
+            return await safe_edit(callback.message, "Вы уже записаны на этот слот.")
+        return await safe_edit(
+            callback.message,
+            text="⚠️ Слот только что заняли. Выберите другое время ⏰",
+            parse_mode="HTML",
+        )
+    except Exception:
+        # неожиданные ошибки — аккуратно сообщим
+        return await safe_edit(callback.message, text="Произошла ошибка сервера. Попробуйте ещё раз.")
+    '''
+    try:
+        create_booking(user[0], machine_id, date_str, hour)
     except Exception:
         return await safe_edit(
             msg=callback.message,
             text="⚠️ Этот слот только что заняли.\nПожалуйста, выберите другое время ⏰",
             parse_mode="HTML",
         )
+    '''
 
     await safe_edit(
         msg=callback.message,
@@ -378,6 +403,7 @@ async def show_user_bookings(msg: types.Message):
 
 @router.callback_query(F.data.startswith("cancel_"))
 async def cancel_booking(callback: types.CallbackQuery):
+    await callback.answer()  # ← быстрый ACK
     booking_id = int(callback.data.split("_")[1])
     with get_conn() as conn:
         conn.execute("DELETE FROM bookings WHERE id=?", (booking_id,))
@@ -460,7 +486,7 @@ async def back_to_dates(callback: types.CallbackQuery):
 async def back_to_machines_all(callback: types.CallbackQuery):
     await callback.answer()
     parts = callback.data.split("_", 4)
-    if len(parts) < 5:
+    if len(parts) != 5 or not parts[4]:
         return await safe_edit(callback.message, text="⚠️ Неверные данные навигации.")
     date = parts[4]
 
