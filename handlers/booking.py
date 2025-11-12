@@ -1,4 +1,4 @@
-from aiogram import Router, types, F, Bot
+from aiogram import Router, types, F
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from aiogram.exceptions import TelegramBadRequest
 
@@ -356,9 +356,7 @@ async def finalize(callback: types.CallbackQuery):
     # напоминание за 30 минут
     try:
         if slot_dt - timedelta(minutes=30) > now:
-            bot: Bot = callback.bot
             await schedule_reminder(
-                bot,
                 callback.from_user.id,
                 machine_name,
                 date_str,

@@ -6,7 +6,7 @@ from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from database import init_db, add_machine, get_machines_by_type
 from config import WASHING_MACHINES, DRYERS
-from scheduler import setup_scheduler, rebuild_reminders_for_horizon  # важно
+from scheduler import setup_scheduler, rebuild_reminders_for_horizon, attach_bot  # важно
 
 def ensure_config_machines():
     # добавим стиралки, если их ещё нет
@@ -53,7 +53,8 @@ async def on_startup(app: web.Application):
     init_db()
     ensure_config_machines()
     setup_scheduler()
-    await rebuild_reminders_for_horizon(bot, hours=48, minutes_before=30)
+    attach_bot(bot)  # ← привязали единственный Bot для задач
+    await rebuild_reminders_for_horizon(hours=48, minutes_before=30)
     # сбрасываем хвост обновлений и ставим вебхук на наш публичный URL
     await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
     print(f"🌍 External URL: {BASE_URL}")

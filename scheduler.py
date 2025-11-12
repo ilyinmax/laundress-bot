@@ -8,6 +8,15 @@ from apscheduler.triggers.date import DateTrigger
 from config import TIMEZONE
 from database import cleanup_old_bookings, get_conn
 
+from aiogram import Bot
+
+BOT_REF: Bot | None = None
+
+def attach_bot(bot: Bot):
+    """Сохраняем ссылку на Bot для задач APScheduler (без пиклинга объекта)."""
+    global BOT_REF
+    BOT_REF = bot
+
 TZ = ZoneInfo(TIMEZONE)
 
 # --- Опциональный SQLAlchemy JobStore (persist) ---
@@ -48,7 +57,8 @@ def setup_scheduler():
         scheduler.start()
     return scheduler
 
-async def schedule_reminder(bot, user_id: int, machine_name: str, date_str: str, hour: int, minutes_before: int = 30):
+async def schedule_reminder(user_id: int, machine_name: str, date_str: str, hour: int, minutes_before: int = 30):
+
     """Создаёт задачу на отправку напоминания."""
     try:
         d = datetime.fromisoformat(date_str).date()
@@ -66,17 +76,20 @@ async def schedule_reminder(bot, user_id: int, machine_name: str, date_str: str,
         send_reminder,
         trigger=DateTrigger(run_date=reminder_dt),
         id=job_id,
-        args=[bot, user_id, machine_name, d.isoformat(), hour, minutes_before],
+        args=[user_id, machine_name, d.isoformat(), hour, minutes_before],
         replace_existing=True,
     )
 
-async def send_reminder(bot, user_id: int, machine_name: str, date_iso: str, hour: int, minutes_before: int):
+async def send_reminder(user_id: int, machine_name: str, date_iso: str, hour: int, minutes_before: int):
     """Отправка напоминания. Если момент напоминания уже прошёл — не шлём."""
     now = datetime.now(TZ)
     slot_dt = datetime.combine(datetime.fromisoformat(date_iso).date(), time(hour=hour), tzinfo=TZ)
     reminder_dt = slot_dt - timedelta(minutes=minutes_before)
     if now > reminder_dt:
         return  # уже позже «-30 минут»: ничего не отправляем
+
+    if BOT_REF is None:
+        return
 
     text = (
         "⏰ <b>Напоминание</b>\n\n"
@@ -86,13 +99,13 @@ async def send_reminder(bot, user_id: int, machine_name: str, date_iso: str, hou
         f"🕒 Время: {hour:02d}:00"
     )
     try:
-        await bot.send_message(user_id, text, parse_mode="HTML")
+        await BOT_REF.send_message(user_id, text, parse_mode="HTML")
     except Exception:
         # молчим, если не удалось отправить (пользователь мог заблокировать бота и т.п.)
         pass
 
 # --- Восстановление напоминаний после рестарта/пробуждения ---
-async def rebuild_reminders_for_horizon(bot, hours: int = 48, minutes_before: int = 30):
+async def rebuild_reminders_for_horizon(hours: int = 48, minutes_before: int = 30):
     now = datetime.now(TZ)
     end = now + timedelta(hours=hours)
 
@@ -109,4 +122,4 @@ async def rebuild_reminders_for_horizon(bot, hours: int = 48, minutes_before: in
         )).fetchall()
 
     for user_id, machine_name, date_iso, hour in rows:
-        await schedule_reminder(bot, user_id, machine_name, date_iso, int(hour), minutes_before)
+        await schedule_reminder(user_id, machine_name, date_iso, int(hour), minutes_before)
