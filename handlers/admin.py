@@ -90,18 +90,37 @@ async def _render_schedule(message: types.Message, date: str):
     for booking_id, machine, hour, surname, room, tg_id, username in records:
         surname = _b64d_try(surname)
         room = _b64d_try(room)
-        who = surname or (('@' + username) if username else f'id:{tg_id}')
-        room_txt = room or "—"
+
+        # Если есть фамилия и username — выводим оба
+        if surname and username:
+            who = f"{surname} (@{username})"
+        elif surname:
+            who = surname
+        elif username:
+            who = f"@{username}"
+        else:
+            who = f"id:{tg_id}"
+
+        # Комната
+        room_txt = room if room else "—"
+
         if machine != current_machine:
-            text += f"\n<b>{machine}</b>\n";
+            text += f"\n<b>{machine}</b>\n"
             current_machine = machine
+
         text += f"  ⏰ {hour:02d}:00 — {who} (комн. {room_txt})\n"
+
         buttons.append([
-            InlineKeyboardButton(text=f"❌ Удалить {hour:02d}:00 ({who})",
-                                 callback_data=f"admin_del_{booking_id}_{date}"),
-            InlineKeyboardButton(text="🚫 Бан",
-                                 callback_data=f"admin_ban_{tg_id}_{date}")
+            InlineKeyboardButton(
+                text=f"❌ Удалить {hour:02d}:00 ({who})",
+                callback_data=f"admin_del_{booking_id}_{date}"
+            ),
+            InlineKeyboardButton(
+                text="🚫 Бан",
+                callback_data=f"admin_ban_{tg_id}_{date}"
+            )
         ])
+
     kb = InlineKeyboardMarkup(inline_keyboard=buttons)
     await message.edit_text(text, parse_mode="HTML", reply_markup=kb)
 
