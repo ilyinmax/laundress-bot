@@ -563,7 +563,7 @@ async def notify_incomplete(message: types.Message):
         try:
             await message.bot.send_message(
                 tg_id, text,
-                reply_markup=kb, parse_mode="HTML", disable_web_page_preview=True
+                reply_markup=kb, parse_mode="HTML", disable_web_page_preview=True, disable_notification=True,
             )
             sent += 1
             await asyncio.sleep(0.05)  # лёгкий троттлинг
@@ -571,7 +571,7 @@ async def notify_incomplete(message: types.Message):
             await asyncio.sleep(e.retry_after + 1)
             try:
                 await message.bot.send_message(
-                    tg_id, text, reply_markup=kb, parse_mode="HTML", disable_web_page_preview=True
+                    tg_id, text, reply_markup=kb, parse_mode="HTML", disable_web_page_preview=True, disable_notification=True,
                 )
                 sent += 1
             except Exception:
