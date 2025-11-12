@@ -28,7 +28,7 @@ jobstores = {"default": SQLA_JobStore} if SQLA_JobStore else None
 
 # --- Запрещаем «догонять» пропущенные напоминания ---
 job_defaults = {
-    "misfire_grace_time": 0,   # опоздали хоть на секунду — не запускать
+    "misfire_grace_time": 1,
     "coalesce": True,
     "max_instances": 1,
 }
