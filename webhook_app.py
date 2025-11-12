@@ -1,5 +1,6 @@
 # webhook_app.py — aiogram v3 + aiohttp, Web Service на Render
 import os
+import asyncio
 from aiohttp import web
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -48,17 +49,41 @@ dp.include_routers(registration_router, booking_router, admin_router)
 async def health(_):
     return web.json_response({"ok": True})
 
+async def _retry_set_webhook(bot: Bot, url: str):
+    for delay in (5, 10, 20, 40):
+        try:
+            await asyncio.sleep(delay)
+            await bot.set_webhook(url, drop_pending_updates=False, request_timeout=20)
+            print(f"✅ Webhook установлен (retry): {url}")
+            return
+        except Exception as e:
+            print(f"⚠️ Повторная попытка через {delay}s не удалась: {e}")
+    print("❗ Не удалось установить вебхук после нескольких попыток.")
+
 # === on_startup: ставим вебхук ===
 async def on_startup(app: web.Application):
     init_db()
     ensure_config_machines()
     setup_scheduler()
     attach_bot(bot)  # ← привязали единственный Bot для задач
-    await rebuild_reminders_for_horizon(hours=48, minutes_before=30)
+    #await rebuild_reminders_for_horizon(hours=48, minutes_before=30)
     # сбрасываем хвост обновлений и ставим вебхук на наш публичный URL
-    await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
-    print(f"🌍 External URL: {BASE_URL}")
-    print(f"✅ Webhook установлен: {WEBHOOK_URL}")
+    #await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True)
+
+    await rebuild_reminders_for_horizon(hours=48, minutes_before=30)
+
+    # Ставим вебхук с коротким таймаутом; при неудаче ретраим в фоне,
+    # чтобы не заваливать старт приложения и не блокировать порт.
+
+    try:
+        await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True, request_timeout=20)
+        print(f"✅ Webhook установлен: {WEBHOOK_URL}")
+    except Exception as e:
+        print(f"⚠️ Не удалось поставить вебхук на старте: {e}. Запускаю ретраии в фоне.")
+        app['wh_retry_task'] = asyncio.create_task(_retry_set_webhook(bot, WEBHOOK_URL))
+
+   # print(f"🌍 External URL: {BASE_URL}")
+   # print(f"✅ Webhook установлен: {WEBHOOK_URL}")
 
 # === on_cleanup ===
 async def on_cleanup(app: web.Application):
