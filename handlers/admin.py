@@ -8,7 +8,12 @@ import pandas as pd
 from database import get_conn, unban_user  # unban_user уже есть в database.py
 from aiogram.filters import Command
 from database import ban_user, tg_id_by_username
-
+from database import (
+    ensure_user_by_surname_room,
+    get_free_hours,
+    get_user_bookings_today,
+    create_booking,
+)
 
 from config import ADMIN_IDS
 from database import (
@@ -450,3 +455,76 @@ async def cmd_ban(msg: types.Message):
     # Финальный бан
     ban_user(int(target_id), reason=reason, days=days)
     await msg.answer(f"🚫 Забанен: <code>{target_id}</code> на {days} дн.\nПричина: {reason}", parse_mode="HTML")
+
+@router.message(Command("abookfio"))
+async def cmd_abookfio(msg: types.Message):
+    """
+    Формат: /abookfio <Фамилия> <Комната> <machine_id> <YYYY-MM-DD> <HH> [коммент]
+    Пример: /abookfio Иванов 412 3 2025-11-14 19 после пары
+    """
+    if not is_admin(msg.from_user.id):
+        return await msg.answer("🚫 Нет прав администратора.")
+
+    parts = (msg.text or "").strip().split(maxsplit=6)  # до 7 токенов
+    if len(parts) < 6:
+        return await msg.answer(
+            "Формат: /abookfio <Фамилия> <Комната> <machine_id> <YYYY-MM-DD> <HH> [комментарий]"
+        )
+
+    _, surname, room, machine_id_s, date_iso, hour_s, *rest = parts
+    comment = rest[0] if rest else ""
+
+    # парсинг чисел и базовая валидация
+    try:
+        machine_id = int(machine_id_s)
+        hour = int(hour_s)
+        assert 0 <= hour <= 23
+        # простая проверка формата даты
+        from datetime import datetime
+        datetime.fromisoformat(date_iso)
+    except Exception:
+        return await msg.answer("Проверьте аргументы: machine_id — число, час 0–23, дата — YYYY-MM-DD.")
+
+    # найдём/создадим пользователя по Фамилии и Комнате (вернётся users.id)
+    user_id = ensure_user_by_surname_room(surname, room)
+
+    # узнаём тип и имя машины
+    with get_conn() as conn:
+        row = conn.execute("SELECT type, name FROM machines WHERE id=?", (machine_id,)).fetchone()
+    if not row:
+        return await msg.answer("Машина не найдена.")
+    machine_type, machine_name = row
+
+    # ограничение: 1 запись на тип в сутки
+    if get_user_bookings_today(user_id, date_iso, machine_type):
+        t = "стиралку" if machine_type == "wash" else "сушилку"
+        return await msg.answer(f"⚠️ У пользователя уже есть запись на {t} в этот день.")
+
+    # слот свободен?
+    free = get_free_hours(machine_id, date_iso)
+    if hour not in free:
+        return await msg.answer("Этот час уже занят. Выберите другой.")
+
+    # создаём запись
+    create_booking(user_id, machine_id, date_iso, hour)
+
+    # ответ админу
+    text = (f"✅ Запись создана:\n"
+            f"{machine_name} • {date_iso} {hour:02d}:00\n"
+            f"Для: {surname} (комн. {room})")
+    if comment:
+        text += f"\nКомментарий: {comment}"
+    await msg.answer(text)
+
+@router.message(Command("machines"))
+async def cmd_machines(msg: types.Message):
+    if not is_admin(msg.from_user.id):
+        return await msg.answer("🚫 Нет прав администратора.")
+    with get_conn() as conn:
+        rows = conn.execute("SELECT id, type, name FROM machines ORDER BY type, name").fetchall()
+    if not rows:
+        return await msg.answer("Машины не настроены.")
+    lines = ["Список машин:\n"]
+    for mid, t, name in rows:
+        lines.append(f"#{mid} — {name} ({'стиралка' if t=='wash' else 'сушилка'})")
+    await msg.answer("\n".join(lines))
