@@ -1,38 +1,23 @@
-name: Keep Render and Neon Alive
+name: Keep Render Alive
 
 on:
   schedule:
-    - cron: "*/5 * * * *"      # каждые 5 мин (UTC)
-    - cron: "2-59/5 * * * *"   # те же 5 мин, но со сдвигом на ~2 мин
+    - cron: "*/5 * * * *"     # каждые 5 минут (UTC)
   workflow_dispatch:
 
-
 jobs:
-  ping:
+  ping-render:
     runs-on: ubuntu-latest
-    timeout-minutes: 2
     steps:
       - name: Keep Render alive
+        env:
+          PING_URL: https://laundress-bot.onrender.com/health
         run: |
+          echo "Pinging $PING_URL ..."
           for i in {1..3}; do
             if curl -fsS --connect-timeout 5 --max-time 10 "$PING_URL"; then
-              echo "OK"; exit 0
+              echo "✅ Render responded"; exit 0
             fi
             echo "retry $i..."; sleep 5
           done
-          echo "::error::Ping failed 3 times"; exit 1
-        env:
-          PING_URL: https://laundress-bot.onrender.com/health
-
-      - name: Keep Neon alive
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: |
-          pip install psycopg2-binary >/dev/null
-          python - <<'PY'
-          import psycopg2, os
-          with psycopg2.connect(os.environ["DATABASE_URL"]) as conn:
-              with conn.cursor() as cur:
-                  cur.execute("SELECT 1;")
-          print("✅ Neon pinged successfully")
-          PY
+          echo "::error::Render did not respond"; exit 1
