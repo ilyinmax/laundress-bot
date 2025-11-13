@@ -143,6 +143,34 @@ else:
 
     def get_conn(): return _SqliteConn()
 
+def ensure_reminders_table():
+    if DATABASE_URL:
+        with get_conn() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS reminders_sent (
+                    user_id INTEGER NOT NULL,
+                    machine_id INTEGER NOT NULL,
+                    date TEXT NOT NULL,
+                    hour INTEGER NOT NULL,
+                    minutes_before INTEGER NOT NULL,
+                    sent_at TIMESTAMPTZ DEFAULT now(),
+                    UNIQUE (user_id, machine_id, date, hour, minutes_before)
+                );
+            """)
+    else:
+        with get_conn() as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS reminders_sent (
+                    user_id INTEGER NOT NULL,
+                    machine_id INTEGER NOT NULL,
+                    date TEXT NOT NULL,
+                    hour INTEGER NOT NULL,
+                    minutes_before INTEGER NOT NULL,
+                    sent_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now')),
+                    UNIQUE (user_id, machine_id, date, hour, minutes_before)
+                );
+            """)
+
 # ---------- инициализация схемы ----------
 def init_db():
     if DATABASE_URL:
@@ -212,6 +240,7 @@ def init_db():
     with get_conn() as conn:
         for stmt in ddl: conn.execute(stmt)
     ensure_ban_tables()
+    ensure_reminders_table()
 
 # ---------- бан/антиспам ----------
 def ensure_ban_tables():
@@ -416,3 +445,20 @@ def cleanup_old_bookings():
     cutoff = today - timedelta(days=1)
     with get_conn() as conn:
         conn.execute("DELETE FROM bookings WHERE date < ?", (cutoff.isoformat(),))
+
+def was_reminder_sent(user_id: int, machine_id: int, date_iso: str, hour: int, minutes_before: int) -> bool:
+    with get_conn() as conn:
+        row = conn.execute("""
+            SELECT 1 FROM reminders_sent
+             WHERE user_id=? AND machine_id=? AND date=? AND hour=? AND minutes_before=?
+             LIMIT 1
+        """, (user_id, machine_id, date_iso, hour, minutes_before)).fetchone()
+    return bool(row)
+
+def mark_reminder_sent(user_id: int, machine_id: int, date_iso: str, hour: int, minutes_before: int):
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT INTO reminders_sent (user_id, machine_id, date, hour, minutes_before)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id, machine_id, date, hour, minutes_before) DO NOTHING
+        """, (user_id, machine_id, date_iso, hour, minutes_before))
