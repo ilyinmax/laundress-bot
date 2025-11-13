@@ -1,27 +1,38 @@
 name: Keep Render Alive
+
 on:
   schedule:
-    - cron: "*/10 * * * *"     # 0,10,20...
-    - cron: "5-59/10 * * * *"  # 5,15,25...
+    - cron: "*/5 * * * *"   # раз в 5 минут
   workflow_dispatch:
 
 jobs:
-  ping-render:
+  ping:
     runs-on: ubuntu-latest
-    timeout-minutes: 1
+    timeout-minutes: 3
     concurrency:
       group: keep-render-alive
       cancel-in-progress: true
     steps:
-      - name: Ping
+      - name: Warm for ~2 minutes (ping every 30s)
         env:
-          PING_URL: https://laundress-bot.onrender.com/health
+          URL: ${{ secrets.RENDER_BASE_URL }}
         run: |
-          date -u
-          for i in {1..3}; do
-            if curl -fsS --retry 2 --retry-all-errors --connect-timeout 5 --max-time 10 "$PING_URL"; then
-              echo "OK"; exit 0
+          # небольшой джиттер, чтобы не совпадать с чужими крон-пиками
+          sleep $((RANDOM % 20))
+
+          end=$((SECONDS + 120))   # 2 минуты
+          ok=0
+          while [ $SECONDS -lt $end ]; do
+            if curl -fsS --retry 1 --connect-timeout 5 --max-time 10 "$URL/health" > /dev/null; then
+              ok=1
+              echo "ok $(date -u +%T)"
+            else
+              echo "retry $(date -u +%T)"
             fi
-            echo "retry $i..."; sleep 5
+            sleep 30
           done
-          echo "::error::no response"; exit 1
+
+          # не валим Workflow, если Render кратковременно тупил
+          if [ $ok -eq 0 ]; then
+            echo "::warning::no successful responses within window"
+          fi
