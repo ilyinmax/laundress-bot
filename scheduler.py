@@ -78,6 +78,7 @@ async def schedule_reminder(user_id: int, machine_name: str, date_str: str, hour
         id=job_id,
         args=[user_id, machine_name, d.isoformat(), hour, minutes_before],
         replace_existing=True,
+        misfire_grace_time = 120,  # до 2 минут задержки не считаем мисфаером
     )
 
 async def send_reminder(user_id: int, machine_name: str, date_iso: str, hour: int, minutes_before: int):
@@ -123,3 +124,22 @@ async def rebuild_reminders_for_horizon(hours: int = 48, minutes_before: int = 3
 
     for user_id, machine_name, date_iso, hour in rows:
         await schedule_reminder(user_id, machine_name, date_iso, int(hour), minutes_before)
+
+async def send_test_message(user_id: int, text: str):
+    if BOT_REF is None:
+        return
+    try:
+        await BOT_REF.send_message(user_id, text, parse_mode="HTML", disable_notification=True)
+    except Exception:
+        pass
+
+async def schedule_test_message(user_id: int, minutes: int = 1, text: str = "⏰ Тестовое напоминание: всё работает ✅"):
+    run_at = datetime.now(TZ) + timedelta(minutes=minutes)
+    scheduler.add_job(
+        send_test_message,
+        trigger=DateTrigger(run_date=run_at),
+        id=f"test_{user_id}_{int(run_at.timestamp())}",
+        args=[user_id, text],
+        replace_existing=True,
+        misfire_grace_time=120,  # до 2 мин терпим задержку
+    )

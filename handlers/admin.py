@@ -25,6 +25,7 @@ from config import ADMIN_IDS
 from zoneinfo import ZoneInfo
 from config import TIMEZONE
 from aiogram.types import FSInputFile  # для экспорта
+from scheduler import schedule_test_message
 
 TZ = ZoneInfo(TIMEZONE)
 
@@ -580,3 +581,25 @@ async def notify_incomplete(message: types.Message):
             skipped += 1
 
     await message.answer(f"Готово. Отправлено: {sent}, не доставлено: {skipped}.")
+
+
+@router.message(Command("test_reminder"))
+async def cmd_test_reminder(msg: types.Message):
+    if not is_admin(msg.from_user.id):
+        return await msg.answer("🚫 Нет доступа.")
+    parts = (msg.text or "").split()
+    minutes = 1
+    if len(parts) > 1:
+        try:
+            minutes = int(parts[1])
+        except ValueError:
+            return await msg.answer("Формат: /test_reminder <минуты> (целое число)")
+
+    minutes = max(1, min(minutes, 180))  # от 1 до 180 минут
+    await schedule_test_message(
+        msg.from_user.id,
+        minutes,
+        text=f"⏰ Тестовое напоминание: пришло через <b>{minutes}</b> мин. ✅",
+    )
+    await msg.answer(f"Готово! Пришлю тест через {minutes} мин (бесшумно).")
+
