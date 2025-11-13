@@ -76,7 +76,7 @@ async def on_startup(app: web.Application):
     # чтобы не заваливать старт приложения и не блокировать порт.
 
     try:
-        await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=True, request_timeout=20)
+        await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=False, request_timeout=20)
         print(f"✅ Webhook установлен: {WEBHOOK_URL}")
     except Exception as e:
         print(f"⚠️ Не удалось поставить вебхук на старте: {e}. Запускаю ретраии в фоне.")

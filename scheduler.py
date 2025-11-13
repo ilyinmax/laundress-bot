@@ -18,6 +18,7 @@ def attach_bot(bot: Bot):
     BOT_REF = bot
 
 TZ = ZoneInfo(TIMEZONE)
+LATE_WINDOW_SEC = 300
 
 # --- Опциональный SQLAlchemy JobStore (persist) ---
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -68,8 +69,10 @@ async def schedule_reminder(user_id: int, machine_name: str, date_str: str, hour
     slot_dt = datetime.combine(d, time(hour=hour), tzinfo=TZ)
     reminder_dt = slot_dt - timedelta(minutes=minutes_before)
     now = datetime.now(TZ)
-    if reminder_dt <= now:
-        return  # поздно напоминать — задачу не ставим
+    if reminder_dt + timedelta(seconds=LATE_WINDOW_SEC) <= now:
+        return
+  #  if reminder_dt <= now:
+  #      return  # поздно напоминать — задачу не ставим
 
     job_id = f"rem_{user_id}_{d.isoformat()}_{hour}"
     scheduler.add_job(
@@ -78,7 +81,7 @@ async def schedule_reminder(user_id: int, machine_name: str, date_str: str, hour
         id=job_id,
         args=[user_id, machine_name, d.isoformat(), hour, minutes_before],
         replace_existing=True,
-        misfire_grace_time = 120,  # до 2 минут задержки не считаем мисфаером
+        misfire_grace_time = LATE_WINDOW_SEC,  # окно для мисфаера
     )
 
 async def send_reminder(user_id: int, machine_name: str, date_iso: str, hour: int, minutes_before: int):
@@ -86,8 +89,12 @@ async def send_reminder(user_id: int, machine_name: str, date_iso: str, hour: in
     now = datetime.now(TZ)
     slot_dt = datetime.combine(datetime.fromisoformat(date_iso).date(), time(hour=hour), tzinfo=TZ)
     reminder_dt = slot_dt - timedelta(minutes=minutes_before)
-    if now > reminder_dt:
-        return  # уже позже «-30 минут»: ничего не отправляем
+    #if now > reminder_dt:
+     #   return  # уже позже «-30 минут»: ничего не отправляем
+
+    # если опоздали больше окна — не шлём
+    if (now - reminder_dt).total_seconds() > LATE_WINDOW_SEC:
+        return
 
     if BOT_REF is None:
         return
