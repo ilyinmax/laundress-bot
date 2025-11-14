@@ -513,7 +513,11 @@ async def finalize(callback: types.CallbackQuery):
 async def auto_add_dryer(callback: types.CallbackQuery):
     await callback.answer()
     try:
-        _, dry_id_str, date_str, hour_str = callback.data.split("_", 3)
+        parts = callback.data.split("_")
+        # ожидаем: ["auto", "dry", "<dry_id>", "<YYYY-MM-DD>", "<HH>"]
+        if len(parts) != 5:
+            raise ValueError("bad callback")
+        _, _, dry_id_str, date_str, hour_str = parts
         dry_id = int(dry_id_str)
         hour = int(hour_str)
     except Exception:
