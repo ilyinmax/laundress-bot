@@ -498,7 +498,7 @@ async def finalize(callback: types.CallbackQuery):
                                         callback_data=f"auto_dry_{dry_id}_{date_str}_{next_hour}",
                                     ),
                                     InlineKeyboardButton(
-                                        text="🙅‍♂️ Нет, спасибо",
+                                        text="❌ Нет, не добавлять",
                                         callback_data="auto_dry_cancel",
                                     ),
                                 ]
