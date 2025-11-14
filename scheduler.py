@@ -133,6 +133,11 @@ async def send_reminder(
 ):
     """
     Отправка напоминания. tg_id — Telegram ID.
+
+    Здесь:
+    - проверяем, что бронь ещё существует;
+    - если это сушка и за час до неё есть стирка, не шлём напоминание;
+    - текст зависит от типа машины (wash/dry).
     """
     now = datetime.now(TZ)
     slot_dt = datetime.combine(
@@ -147,24 +152,87 @@ async def send_reminder(
     if BOT_REF is None:
         return
 
-    # антидубли (фиксируем по tg_id + machine_id + дате/часу)
+    # определяем машину и её тип
     m_id = get_machine_id_by_name(machine_name)
-    if m_id is not None and was_reminder_sent(
-        tg_id, m_id, date_iso, hour, minutes_before
-    ):
+    if m_id is None:
+        # если по имени не нашли машину — лучше вообще ничего не слать
         return
+
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT type FROM machines WHERE id=?",
+            (m_id,),
+        ).fetchone()
+    machine_type = row[0] if row else None
+
+    # 1) проверка: бронь всё ещё существует?
+    with get_conn() as conn:
+        exists = conn.execute(
+            """
+            SELECT 1
+              FROM bookings b
+              JOIN users   u ON u.id = b.user_id
+             WHERE u.tg_id = ?
+               AND b.machine_id = ?
+               AND b.date = ?
+               AND b.hour = ?
+             LIMIT 1
+        """,
+            (tg_id, m_id, date_iso, hour),
+        ).fetchone()
+
+    if not exists:
+        # запись отменена или перенесена — не шлём
+        return
+
+    # 2) если это СУШКА и сразу перед ней есть СТИРКА этого же пользователя,
+    # то напоминание на сушку не отправляем
+    if machine_type == "dry" and hour > 0:
+        prev_hour = hour - 1
+        with get_conn() as conn:
+            has_wash_prev = conn.execute(
+                """
+                SELECT 1
+                  FROM bookings b
+                  JOIN users   u ON u.id = b.user_id
+                  JOIN machines m ON m.id = b.machine_id
+                 WHERE u.tg_id = ?
+                   AND b.date = ?
+                   AND b.hour = ?
+                   AND m.type = 'wash'
+                 LIMIT 1
+            """,
+                (tg_id, date_iso, prev_hour),
+            ).fetchone()
+        if has_wash_prev:
+            # сразу после стирки идёт сушка — напоминание для сушилки не нужно
+            return
+
+    # 3) антидубли (фиксируем по tg_id + machine_id + дате/часу)
+    if was_reminder_sent(tg_id, m_id, date_iso, hour, minutes_before):
+        return
+
+    # подбираем текст под тип машины
+    if machine_type == "wash":
+        kind = "стирка"
+        emoji = "🧺"
+    elif machine_type == "dry":
+        kind = "сушка"
+        emoji = "🌬️"
+    else:
+        kind = "стирка"
+        emoji = "🧺"
 
     text = (
         "⏰ <b>Напоминание</b>\n\n"
-        f"Через <b>{minutes_before} мин</b> у вас стирка.\n"
-        f"🧺 Машина: <b>{machine_name}</b>\n"
+        f"Через <b>{minutes_before} мин</b> у вас {kind}.\n"
+        f"{emoji} Машина: <b>{machine_name}</b>\n"
         f"📅 Дата: {date_iso}\n"
         f"🕒 Время: {hour:02d}:00"
     )
     try:
         await BOT_REF.send_message(tg_id, text, parse_mode="HTML")
-        if m_id is not None:
-            mark_reminder_sent(tg_id, m_id, date_iso, hour, minutes_before)
+        mark_reminder_sent(tg_id, m_id, date_iso, hour, minutes_before)
     except Exception:
         # молча, если не удалось отправить
         pass
@@ -178,7 +246,7 @@ async def rebuild_reminders_for_horizon(
 ):
     """
     При старте сервиса пробегаем по записям в горизонте `hours`
-    и ставим напоминания. ВАЖНО: здесь теперь берём u.tg_id.
+    и ставим напоминания. ВАЖНО: здесь берём u.tg_id.
     """
     now = datetime.now(TZ)
     end = now + timedelta(hours=hours)
