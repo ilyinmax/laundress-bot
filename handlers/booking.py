@@ -509,7 +509,9 @@ async def finalize(callback: types.CallbackQuery):
 
 
 # авто-создание сушки после стирки
-@router.callback_query(F.data.startswith("auto_dry_"))
+@router.callback_query(
+    F.data.startswith("auto_dry_") & (F.data != "auto_dry_cancel")
+)
 async def auto_add_dryer(callback: types.CallbackQuery):
     await callback.answer()
     try:
@@ -601,7 +603,7 @@ async def auto_add_dryer(callback: types.CallbackQuery):
 
 @router.callback_query(F.data == "auto_dry_cancel")
 async def auto_dry_cancel(callback: types.CallbackQuery):
-    await callback.answer("Ок, без сушки 👍")
+    await callback.answer("Заявка без сушки подтверждена")
     try:
         await callback.message.edit_reply_markup(reply_markup=None)
     except Exception:
