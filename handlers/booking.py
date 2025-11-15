@@ -376,7 +376,8 @@ async def finalize(callback: types.CallbackQuery):
     user = get_user(callback.from_user.id)
     if is_banned(callback.from_user.id):
         return await safe_edit(
-            callback.message, "🚫 Вы заблокированы и не можете записываться."
+            callback.message,
+            text="🚫 Вы заблокированы и не можете записываться.",
         )
 
     if not user or not (user[2] and user[3]):
@@ -394,7 +395,8 @@ async def finalize(callback: types.CallbackQuery):
     slot_dt = datetime.combine(sel_date, time(hour=hour, tzinfo=TZ))
     if slot_dt <= now:
         return await safe_edit(
-            callback.message, "⏳ Это время уже прошло. Выберите другой слот."
+            callback.message,
+            text="⏳ Это время уже прошло. Выберите другой слот.",
         )
 
     with get_conn() as conn:
