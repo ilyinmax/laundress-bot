@@ -1,7 +1,6 @@
 # scheduler.py
 from datetime import datetime, timedelta, time
 from zoneinfo import ZoneInfo
-import os
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
@@ -29,38 +28,17 @@ def attach_bot(bot: Bot):
 TZ = ZoneInfo(TIMEZONE)
 LATE_WINDOW_SEC = 300  # окно опоздания для напоминания (секунд)
 
-# --- Опциональный SQLAlchemy JobStore (persist) ---
-DATABASE_URL = os.getenv("DATABASE_URL")
-SQLA_JobStore = None
-if DATABASE_URL:
-    # SQLAlchemy 2.x требует корректную схему
-    if DATABASE_URL.startswith("postgres://"):
-        DATABASE_URL = DATABASE_URL.replace(
-            "postgres://", "postgresql+psycopg2://", 1
-        )
-    try:
-        from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
-
-        SQLA_JobStore = SQLAlchemyJobStore(url=DATABASE_URL)
-    except Exception:
-        # Тихий фолбэк на in-memory
-        SQLA_JobStore = None
-
-jobstores = {"default": SQLA_JobStore} if SQLA_JobStore else None
-
 # --- Запрещаем «догонять» пропущенные напоминания слишком поздно ---
 job_defaults = {
-    "misfire_grace_time": 1,
+    "misfire_grace_time": 120,
     "coalesce": True,
     "max_instances": 1,
 }
 
 scheduler = AsyncIOScheduler(
     timezone=TZ,
-    jobstores=jobstores,
     job_defaults=job_defaults,
 )
-
 
 def setup_scheduler():
     if not scheduler.running:
@@ -80,6 +58,7 @@ def setup_scheduler():
             seconds=60,
             id="watchdog_reminders",
             replace_existing=True,
+            misfire_grace_time=300,
         )
         scheduler.start()
     return scheduler
