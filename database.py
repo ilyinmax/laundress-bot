@@ -142,7 +142,7 @@ else:
                 self._conn.close()
 
     def get_conn(): return _SqliteConn()
-
+'''
 def ensure_reminders_table():
     if DATABASE_URL:
         with get_conn() as conn:
@@ -168,6 +168,42 @@ def ensure_reminders_table():
                     minutes_before INTEGER NOT NULL,
                     sent_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now')),
                     UNIQUE (user_id, machine_id, date, hour, minutes_before)
+                );
+            """)
+'''
+def ensure_reminders_table():
+    """
+    Таблица для антидубликатов напоминаний.
+    Храним именно tg_id (а не users.id).
+    Если старая таблица была с другим набором колонок, она будет
+    пересоздана (данные о прошлых напоминаниях нам не критичны).
+    """
+    with get_conn() as conn:
+        # На случай старой схемы — пересоздаём таблицу.
+        conn.execute("DROP TABLE IF EXISTS reminders_sent")
+
+        if DATABASE_URL:
+            conn.execute("""
+                CREATE TABLE reminders_sent (
+                    tg_id          BIGINT      NOT NULL,
+                    machine_id     INTEGER     NOT NULL,
+                    date           DATE        NOT NULL,
+                    hour           INTEGER     NOT NULL,
+                    minutes_before INTEGER     NOT NULL,
+                    sent_at        TIMESTAMPTZ DEFAULT now(),
+                    PRIMARY KEY (tg_id, machine_id, date, hour, minutes_before)
+                );
+            """)
+        else:
+            conn.execute("""
+                CREATE TABLE reminders_sent (
+                    tg_id          INTEGER     NOT NULL,
+                    machine_id     INTEGER     NOT NULL,
+                    date           TEXT        NOT NULL,
+                    hour           INTEGER     NOT NULL,
+                    minutes_before INTEGER     NOT NULL,
+                    sent_at        TEXT        DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now')),
+                    PRIMARY KEY (tg_id, machine_id, date, hour, minutes_before)
                 );
             """)
 
@@ -446,6 +482,37 @@ def cleanup_old_bookings():
     with get_conn() as conn:
         conn.execute("DELETE FROM bookings WHERE date < ?", (cutoff.isoformat(),))
 
+def was_reminder_sent(
+    tg_id: int, machine_id: int, date_iso: str, hour: int, minutes_before: int
+) -> bool:
+    """
+    Проверяем факт отправки напоминания по связке:
+    tg_id + machine_id + дата + час + минут_до.
+    """
+    with get_conn() as conn:
+        row = conn.execute("""
+            SELECT 1
+              FROM reminders_sent
+             WHERE tg_id=? AND machine_id=? AND date=? AND hour=? AND minutes_before=?
+             LIMIT 1
+        """, (tg_id, machine_id, date_iso, hour, minutes_before)).fetchone()
+    return bool(row)
+
+
+def mark_reminder_sent(
+    tg_id: int, machine_id: int, date_iso: str, hour: int, minutes_before: int
+) -> None:
+    """
+    Помечаем напоминание как отправленное.
+    """
+    with get_conn() as conn:
+        conn.execute("""
+            INSERT INTO reminders_sent (tg_id, machine_id, date, hour, minutes_before)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(tg_id, machine_id, date, hour, minutes_before) DO NOTHING
+        """, (tg_id, machine_id, date_iso, hour, minutes_before))
+
+'''
 def was_reminder_sent(user_id: int, machine_id: int, date_iso: str, hour: int, minutes_before: int) -> bool:
     with get_conn() as conn:
         row = conn.execute("""
@@ -462,3 +529,4 @@ def mark_reminder_sent(user_id: int, machine_id: int, date_iso: str, hour: int, 
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(user_id, machine_id, date, hour, minutes_before) DO NOTHING
         """, (user_id, machine_id, date_iso, hour, minutes_before))
+'''
