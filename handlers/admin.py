@@ -603,3 +603,51 @@ async def cmd_test_reminder(msg: types.Message):
     )
     await msg.answer(f"Готово! Пришлю тест через {minutes} мин (бесшумно).")
 
+@router.message(Command("laundry_news"))
+async def cmd_laundry_news(message: types.Message):
+    if not is_admin(message.from_user.id):
+        return await message.answer("🚫 Нет доступа.")
+
+    # текст рассылки
+    text = (
+        "Отличные новости по прачечной 🎉\n"
+        "Рабочие машины:\n"
+        "🧺 стиралки – №1, 3, 6\n"
+        "🌬 сушилки – №2, 4\n"
+        "Пользуемся и бережём машинки 🙏"
+    )
+
+    # берём всех пользователей бота
+    with get_conn() as conn:
+        rows = conn.execute("SELECT tg_id FROM users").fetchall()
+
+    sent, skipped = 0, 0
+
+    for (tg_id,) in rows:
+        try:
+            await message.bot.send_message(
+                tg_id,
+                text,
+                disable_notification=True,   # чтобы не было диких пушей
+            )
+            sent += 1
+            await asyncio.sleep(0.05)        # лёгкий троттлинг
+        except TelegramRetryAfter as e:
+            # если телега попросила подождать — ждём и пробуем ещё раз
+            await asyncio.sleep(e.retry_after + 1)
+            try:
+                await message.bot.send_message(
+                    tg_id,
+                    text,
+                    disable_notification=True,
+                )
+                sent += 1
+            except Exception:
+                skipped += 1
+        except Exception:
+            skipped += 1
+
+    await message.answer(
+        f"Готово. Сообщение отправлено: {sent}, не доставлено: {skipped}."
+    )
+
