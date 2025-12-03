@@ -628,7 +628,6 @@ async def cmd_laundry_news(message: types.Message):
             await message.bot.send_message(
                 tg_id,
                 text,
-                disable_notification=True,   # чтобы не было диких пушей
             )
             sent += 1
             await asyncio.sleep(0.05)        # лёгкий троттлинг
@@ -639,7 +638,6 @@ async def cmd_laundry_news(message: types.Message):
                 await message.bot.send_message(
                     tg_id,
                     text,
-                    disable_notification=True,
                 )
                 sent += 1
             except Exception:
