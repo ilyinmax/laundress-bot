@@ -55,7 +55,7 @@ def setup_scheduler():
         scheduler.add_job(
             watchdog_tick,
             trigger="interval",
-            seconds=60,
+            seconds=600,
             id="watchdog_reminders",
             replace_existing=True,
             misfire_grace_time=300,
