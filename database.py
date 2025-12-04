@@ -92,7 +92,7 @@ class _CursorWrapper:
     def close(self):
         try: self._cur.close()
         except Exception: pass
-
+'''
 if DATABASE_URL:
     import psycopg2
     from psycopg2 import pool
@@ -121,7 +121,101 @@ if DATABASE_URL:
         def __exit__(self, exc_type, exc, tb): self.close()
 
     def get_conn(): return _PgConn()
+'''
+if DATABASE_URL:
+    import psycopg2
+    from psycopg2 import pool
 
+    _pg_pool = pool.SimpleConnectionPool(1, 10, DATABASE_URL)
+
+    class _PgConn:
+        def __init__(self):
+            # сразу берём коннект из пула
+            self._conn = _pg_pool.getconn()
+            self._conn.autocommit = True
+            self._opened: list[_CursorWrapper] = []
+
+        def _reset_conn(self):
+            """
+            Пересоздаёт соединение, если старое умерло
+            (Neon его закрыл при scale-to-zero и т.п.).
+            """
+            # закрываем все открытые курсоры, если были
+            for w in self._opened:
+                try:
+                    w.close()
+                except Exception:
+                    pass
+            self._opened.clear()
+
+            try:
+                if self._conn is not None:
+                    # пытаемся аккуратно вернуть коннект в пул и закрыть его
+                    _pg_pool.putconn(self._conn, close=True)
+            except Exception:
+                # если пул уже в неадеквате — просто закрываем
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+
+            # берём новый коннект
+            self._conn = _pg_pool.getconn()
+            self._conn.autocommit = True
+
+        def execute(self, sql: str, params=()):
+            sql = _rewrite_insert_or_ignore(sql)
+            sql = _rewrite_qmarks(sql)
+
+            # если коннект уже помечен как закрытый — пересоздаём заранее
+            if getattr(self._conn, "closed", 0):
+                self._reset_conn()
+
+            try:
+                cur = self._conn.cursor()
+                cur.execute(sql, params)
+            except psycopg2.OperationalError:
+                # соединение умерло (например, "SSL connection has been closed unexpectedly")
+                # → пересоздаём и пробуем ещё раз
+                self._reset_conn()
+                cur = self._conn.cursor()
+                cur.execute(sql, params)
+
+            w = _CursorWrapper(cur)
+            self._opened.append(w)
+            return w
+
+        def commit(self):
+            # autocommit=True, поэтому ничего не делаем
+            pass
+
+        def close(self):
+            # закрываем все обёртки курсоров
+            for w in self._opened:
+                try:
+                    w.close()
+                except Exception:
+                    pass
+            self._opened.clear()
+
+            # возвращаем коннект в пул (без close=True — он живой и пригодится)
+            try:
+                _pg_pool.putconn(self._conn)
+            except Exception:
+                # если что-то пошло не так — просто закрываем
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            self.close()
+
+    def get_conn() -> _PgConn:
+        return _PgConn()
 else:
     import sqlite3
     class _SqliteConn:
