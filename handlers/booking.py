@@ -147,6 +147,7 @@ async def choose_date_first(
         if reason:
             text += f"\nПричина: {reason}"
         return await msg.answer(text)
+
     user = get_user(uid)
     if not user or not (user[2] and user[3]):
         return await msg.answer(
@@ -169,11 +170,10 @@ async def choose_date_first(
 
     kb = InlineKeyboardMarkup(inline_keyboard=days_buttons)
     text = "Выберите дату:"
+
     if edit:
-        try:
-            await msg.edit_text(text, reply_markup=kb)
-        except TelegramBadRequest:
-            await msg.edit_reply_markup(reply_markup=kb)
+        # используем safe_edit, он сам игнорирует "message is not modified"
+        await safe_edit(msg, text=text, reply_markup=kb, parse_mode=None)
     else:
         await msg.answer(text, reply_markup=kb)
 
