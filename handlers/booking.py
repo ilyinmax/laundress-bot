@@ -33,6 +33,22 @@ TZ = ZoneInfo(TIMEZONE)
 def now_local() -> datetime:
     return datetime.now(TZ)
 
+def _busy_map_for_date(date_iso: str) -> dict[int, set[int]]:
+    """
+    {machine_id: {busy_hour, ...}} для выбранной даты.
+    Один запрос вместо N*get_free_hours().
+    """
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT machine_id, hour FROM bookings WHERE date=?",
+            (date_iso,),
+        ).fetchall()
+
+    busy: dict[int, set[int]] = {}
+    for mid, h in rows:
+        busy.setdefault(int(mid), set()).add(int(h))
+    return busy
+
 
 router = Router()
 
@@ -78,7 +94,39 @@ async def safe_edit(
             return None
         raise
 
+def _free_per_type_for_date(date_iso: str) -> tuple[int, int]:
+    now = now_local()
+    today_iso = now.date().isoformat()
 
+    with get_conn() as conn:
+        machines = conn.execute("SELECT id, type FROM machines").fetchall()
+
+    busy = _busy_map_for_date(date_iso)
+
+    free_wash_slots = 0
+    free_dry_slots = 0
+
+    for mid, mtype in machines:
+        mid = int(mid)
+        busy_hours = busy.get(mid, set())
+
+        # считаем свободные часы без доп. запросов
+        free_cnt = 0
+        for h in WORKING_HOURS:
+            if date_iso == today_iso and h <= now.hour:
+                continue
+            if h not in busy_hours:
+                free_cnt += 1
+
+        if mtype == "wash":
+            free_wash_slots += free_cnt
+        else:
+            free_dry_slots += free_cnt
+
+    return free_wash_slots, free_dry_slots
+
+
+'''
 # -------- вспомогательные подсчёты свободных --------
 def _free_per_type_for_date(date_iso: str) -> tuple[int, int]:
     """
@@ -107,7 +155,7 @@ def _free_per_type_for_date(date_iso: str) -> tuple[int, int]:
                 free_dry_slots += cnt
 
     return free_wash_slots, free_dry_slots
-
+'''
 
 def _free_hours_for_machine_on_date(machine_id: int, date_iso: str) -> list[int]:
     """Список СВОБОДНЫХ часов по машине на дату (для 'сегодня' — только будущие)."""
@@ -184,6 +232,7 @@ async def choose_date_first(
             "Просто повторите /book ещё раз."
         )
 
+'''
 async def _show_machines_for_date(message: Message, date: str):
     """Текст + кнопки по всем машинам на выбранную дату."""
     with get_conn() as conn:
@@ -253,6 +302,83 @@ async def _show_machines_for_date(message: Message, date: str):
     kb = InlineKeyboardMarkup(inline_keyboard=rows_btn)
     text = "\n".join(lines).rstrip()
     await safe_edit(message, text=text, reply_markup=kb)
+'''
+
+async def _show_machines_for_date(message: Message, date: str):
+    with get_conn() as conn:
+        machines = conn.execute(
+            "SELECT id, type, name FROM machines ORDER BY type, id"
+        ).fetchall()
+
+    if not machines:
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ К датам", callback_data="back_to_dates")]
+            ]
+        )
+        return await safe_edit(
+            message,
+            text="Машины ещё не добавлены администратором.",
+            reply_markup=kb,
+        )
+
+    busy = _busy_map_for_date(date)
+
+    # красиво форматируем дату
+    try:
+        d_obj = datetime.fromisoformat(date).date()
+        header_date = d_obj.strftime("%d.%m.%Y")
+    except Exception:
+        header_date = date
+
+    lines: list[str] = [f"📅 {header_date} — свободные слоты\n"]
+    rows_btn: list[list[InlineKeyboardButton]] = []
+
+    now = now_local()
+    today_iso = now.date().isoformat()
+
+    any_free = False
+    for machine_id, machine_type, machine_name in machines:
+        machine_id = int(machine_id)
+        busy_hours = busy.get(machine_id, set())
+
+        free_hours = []
+        for h in WORKING_HOURS:
+            if date == today_iso and h <= now.hour:
+                continue
+            if h not in busy_hours:
+                free_hours.append(h)
+
+        if not free_hours:
+            continue
+
+        any_free = True
+        emoji = "🧺" if machine_type == "wash" else "🌬️"
+        lines.append(f"{emoji} {machine_name}")
+        lines.append("   " + ", ".join(f"{h:02d}" for h in free_hours) + "\n")
+
+        rows_btn.append([
+            InlineKeyboardButton(
+                text=f"{emoji} {machine_name}",
+                callback_data=f"machine_{machine_id}_{date}",
+            )
+        ])
+
+    if not any_free:
+        kb = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text="⬅️ К датам", callback_data="back_to_dates")]
+            ]
+        )
+        return await safe_edit(
+            message,
+            text=f"На {date} свободных машин нет.",
+            reply_markup=kb,
+        )
+
+    rows_btn.append([InlineKeyboardButton(text="⬅️ К датам", callback_data="back_to_dates")])
+    kb = InlineKeyboardMarkup(inline_keyboard=rows_btn)
+    await safe_edit(message, text="\n".join(lines).rstrip(), reply_markup=kb)
 
 
 # Выбрали дату → показываем ВСЕ машины (wash+dry) и список свободных слотов
@@ -295,7 +421,15 @@ async def choose_hour(callback: types.CallbackQuery):
         return await safe_edit(callback.message, text="Ошибка: машина не найдена.")
     machine_type, machine_name = row
 
-    free_hours = set(get_free_hours(machine_id, date))
+    with get_conn() as conn:
+        busy_rows = conn.execute(
+            "SELECT hour FROM bookings WHERE machine_id=? AND date=?",
+            (machine_id, date),
+        ).fetchall()
+    busy_hours = {int(r[0]) for r in busy_rows}
+    free_hours = {h for h in WORKING_HOURS if h not in busy_hours}
+
+    #free_hours = set(get_free_hours(machine_id, date))
     all_hours = WORKING_HOURS
 
     now = now_local()

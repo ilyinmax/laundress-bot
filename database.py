@@ -97,6 +97,8 @@ class _CursorWrapper:
         try: self._cur.close()
         except Exception: pass
 
+
+'''
 if DATABASE_URL:
     import psycopg2
     from psycopg2 import OperationalError
@@ -149,7 +151,6 @@ if DATABASE_URL:
     def get_conn() -> _PgConn:
         return _PgConn()
 
-    '''
     import psycopg2
     from psycopg2 import pool
 
@@ -244,6 +245,75 @@ if DATABASE_URL:
     def get_conn() -> _PgConn:
         return _PgConn()
     '''
+if DATABASE_URL:
+    import psycopg2
+    from psycopg2 import OperationalError
+    from psycopg2 import pool
+
+    # держим несколько постоянных коннектов, без пересоздания на каждый SELECT
+    _pg_pool = pool.SimpleConnectionPool(
+        1, 10,  # min/max
+        DATABASE_URL,
+        connect_timeout=3,
+    )
+
+    class _PgConn:
+        def __init__(self):
+            try:
+                self._conn = _pg_pool.getconn()
+            except Exception as e:
+                raise DBUnavailable(str(e)) from e
+            self._conn.autocommit = True
+            self._opened: list[_CursorWrapper] = []
+
+        def _reset_conn(self):
+            try:
+                _pg_pool.putconn(self._conn, close=True)
+            except Exception:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+            self._conn = _pg_pool.getconn()
+            self._conn.autocommit = True
+
+        def execute(self, sql: str, params=()):
+            sql = _rewrite_insert_or_ignore(sql)
+            sql = _rewrite_qmarks(sql)
+            try:
+                cur = self._conn.cursor()
+                cur.execute(sql, params)
+            except OperationalError as e:
+                # Neon/сеть могло прибить коннект — пересоздаём и повторяем 1 раз
+                self._reset_conn()
+                cur = self._conn.cursor()
+                cur.execute(sql, params)
+
+            w = _CursorWrapper(cur)
+            self._opened.append(w)
+            return w
+
+        def close(self):
+            for w in self._opened:
+                try:
+                    w.close()
+                except Exception:
+                    pass
+            self._opened.clear()
+            try:
+                _pg_pool.putconn(self._conn)
+            except Exception:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+
+        def __enter__(self): return self
+        def __exit__(self, exc_type, exc, tb): self.close()
+
+    def get_conn() -> _PgConn:
+        return _PgConn()
+
 else:
     import sqlite3
     class _SqliteConn:
