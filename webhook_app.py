@@ -1,15 +1,17 @@
+# webhook_app.py
 import os
 import asyncio
 from aiohttp import web
+
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 
-from database import init_db, add_machine, get_machines_by_type
+from database import init_db, add_machine, get_machines_by_type, DBUnavailable
 from config import WASHING_MACHINES, DRYERS
-from scheduler import setup_scheduler, rebuild_reminders_for_horizon, attach_bot  # важно
+from scheduler import setup_scheduler, rebuild_reminders_for_horizon, attach_bot
 
-
+'''
 def ensure_config_machines():
     # добавим стиралки, если их ещё нет
     if not get_machines_by_type("wash"):
@@ -19,6 +21,12 @@ def ensure_config_machines():
     if not get_machines_by_type("dry"):
         for name in DRYERS:
             add_machine("dry", name)
+'''
+def ensure_config_machines():
+    for name in WASHING_MACHINES:
+        add_machine("wash", name)
+    for name in DRYERS:
+        add_machine("dry", name)
 
 
 # === ENV ===
@@ -33,15 +41,24 @@ if not BASE_URL:
 WEBHOOK_PATH = "/webhook"
 WEBHOOK_URL = f"{BASE_URL}{WEBHOOK_PATH}"
 
+
+@web.middleware
+async def readiness_middleware(request: web.Request, handler):
+    # Пока не готовы — НЕ принимаем апдейты (Telegram будет ретраить)
+    if request.path == WEBHOOK_PATH and not request.app["ready"].is_set():
+        return web.Response(status=503, text="starting")
+    return await handler(request)
+
+
 # === Telegram client с таймаутами ===
 session = AiohttpSession()
 bot = Bot(token=BOT_TOKEN, session=session)
 dp = Dispatcher()
 
 # === Подключаем твои роутеры ===
-from handlers.registration import router as registration_router
-from handlers.booking import router as booking_router
-from handlers.admin import router as admin_router
+from handlers.registration import router as registration_router  # noqa: E402
+from handlers.booking import router as booking_router  # noqa: E402
+from handlers.admin import router as admin_router  # noqa: E402
 
 dp.include_routers(registration_router, booking_router, admin_router)
 
@@ -62,61 +79,96 @@ async def _retry_set_webhook(bot: Bot, url: str):
             print(f"⚠️ Повторная попытка через {delay}s не удалась: {e}")
     print("❗ Не удалось установить вебхук после нескольких попыток.")
 
+async def init_db_with_retries():
+    delay = 1
+    while True:
+        try:
+            init_db()
+            ensure_config_machines()
+            return
+        except DBUnavailable as e:
+            # print(f"⏳ DB недоступна (Neon sleep): {e}. Повтор через {delay}s…")
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 60)  # 1s → 2s → 4s → … → 60s
+
 
 # === Фоновая инициализация бота ===
 async def background_init(app: web.Application):
     try:
-        # БД и конфиг машин
+        # КРИТИЧНЫЙ МИНИМУМ: должен завершиться до приёма апдейтов
+        '''
         init_db()
         ensure_config_machines()
+        setup_scheduler()
+        attach_bot(bot)
+        '''
+        await init_db_with_retries()
 
-        # Планировщик + бот для задач
         setup_scheduler()
         attach_bot(bot)
 
-        # Восстанавливаем напоминания
-        await rebuild_reminders_for_horizon(hours=48, minutes_before=30)
+        # Теперь можно принимать апдейты: таблицы/машины/планировщик готовы
+        app["ready"].set()
+        print("✅ Init: ready")
+
+        # НЕ критично: восстанавливаем напоминания отдельной задачей
+        app["reminders_task"] = asyncio.create_task(
+            rebuild_reminders_for_horizon(hours=48, minutes_before=30)
+        )
 
         # Ставим вебхук
         try:
             await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=False, request_timeout=20)
             print(f"✅ Webhook установлен: {WEBHOOK_URL}")
         except Exception as e:
-            print(f"⚠️ Не удалось поставить вебхук на старте: {e}. Запускаю ретраии в фоне.")
+            print(f"⚠️ Не удалось поставить вебхук на старте: {e}. Запускаю ретраи.")
             app["wh_retry_task"] = asyncio.create_task(_retry_set_webhook(bot, WEBHOOK_URL))
 
     except Exception as e:
-        # Тут можно добавить более подробный лог, если захочешь
-        print(f"❌ Ошибка фоновой инициализации: {e}")
+        # ready НЕ ставим → /webhook будет отдавать 503, Telegram будет ретраить
+        print(f"❌ Ошибка инициализации: {e}")
 
 
 # === on_startup / on_cleanup ===
 async def on_startup(app: web.Application):
-    # Запускаем тяжёлую инициализацию в фоне, чтобы не блокировать accept запросов
+    # Стартуем инициализацию в фоне, но апдейты не примем, пока app["ready"] не set()
     app["init_task"] = asyncio.create_task(background_init(app))
 
 
 async def on_cleanup(app: web.Application):
-    # Аккуратно гасим фоновую задачу, если она ещё живёт
-    init_task = app.get("init_task")
-    if init_task and not init_task.done():
-        init_task.cancel()
-        try:
-            await init_task
-        except asyncio.CancelledError:
-            pass
+    # Гасим фоновые задачи
+    for key in ("wh_retry_task", "reminders_task", "init_task"):
+        task = app.get(key)
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
-    # закрываем сессию бота
+    # (опционально) гасим APScheduler, если он был запущен
+    try:
+        from scheduler import scheduler as _sched  # noqa: E402
+        if getattr(_sched, "running", False):
+            _sched.shutdown(wait=False)
+    except Exception:
+        pass
+
+    # Закрываем сессию бота
     await bot.session.close()
 
 
 # === aiohttp-приложение ===
-app = web.Application()
+app = web.Application(middlewares=[readiness_middleware])
+app["ready"] = asyncio.Event()
+
 app.on_startup.append(on_startup)
 app.on_cleanup.append(on_cleanup)
 
 # маршруты
 app.router.add_get("/health", health)
+
+# вебхук
 SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
 setup_application(app, dp, bot=bot)  # корректное завершение
 

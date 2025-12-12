@@ -9,6 +9,10 @@ from config import DB_PATH, WORKING_HOURS, ADMIN_IDS, TIMEZONE
 
 TZ = ZoneInfo(TIMEZONE)
 
+class DBUnavailable(Exception):
+    """База недоступна (Neon sleep / сеть / connect timeout)."""
+    pass
+
 # ---------- админ-утилиты ----------
 def _admin_set_from_config():
     raw = ADMIN_IDS
@@ -92,37 +96,60 @@ class _CursorWrapper:
     def close(self):
         try: self._cur.close()
         except Exception: pass
-'''
+
 if DATABASE_URL:
     import psycopg2
-    from psycopg2 import pool
-    _pg_pool = pool.SimpleConnectionPool(1, 10, DATABASE_URL)
+    from psycopg2 import OperationalError
+
+    def _pg_connect():
+        # важно: маленький таймаут, чтобы не "висеть" на первом запросе
+        # sslmode обычно уже в DATABASE_URL у Neon, но connect_timeout лишним не будет
+        return psycopg2.connect(DATABASE_URL, connect_timeout=3)
 
     class _PgConn:
         def __init__(self):
-            self._conn = _pg_pool.getconn()
+            try:
+                self._conn = _pg_connect()
+            except OperationalError as e:
+                raise DBUnavailable(str(e)) from e
             self._conn.autocommit = True
             self._opened = []
 
         def execute(self, sql: str, params=()):
             sql = _rewrite_insert_or_ignore(sql)
             sql = _rewrite_qmarks(sql)
-            cur = self._conn.cursor()
-            cur.execute(sql, params)
+            try:
+                cur = self._conn.cursor()
+                cur.execute(sql, params)
+            except OperationalError as e:
+                raise DBUnavailable(str(e)) from e
+
             w = _CursorWrapper(cur)
             self._opened.append(w)
             return w
 
-        def commit(self): pass
         def close(self):
-            for w in self._opened: w.close()
-            _pg_pool.putconn(self._conn)
-        def __enter__(self): return self
-        def __exit__(self, exc_type, exc, tb): self.close()
+            for w in self._opened:
+                try:
+                    w.close()
+                except Exception:
+                    pass
+            self._opened.clear()
+            try:
+                self._conn.close()
+            except Exception:
+                pass
 
-    def get_conn(): return _PgConn()
-'''
-if DATABASE_URL:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            self.close()
+
+    def get_conn() -> _PgConn:
+        return _PgConn()
+
+    '''
     import psycopg2
     from psycopg2 import pool
 
@@ -216,6 +243,7 @@ if DATABASE_URL:
 
     def get_conn() -> _PgConn:
         return _PgConn()
+    '''
 else:
     import sqlite3
     class _SqliteConn:
@@ -236,35 +264,7 @@ else:
                 self._conn.close()
 
     def get_conn(): return _SqliteConn()
-'''
-def ensure_reminders_table():
-    if DATABASE_URL:
-        with get_conn() as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS reminders_sent (
-                    user_id INTEGER NOT NULL,
-                    machine_id INTEGER NOT NULL,
-                    date TEXT NOT NULL,
-                    hour INTEGER NOT NULL,
-                    minutes_before INTEGER NOT NULL,
-                    sent_at TIMESTAMPTZ DEFAULT now(),
-                    UNIQUE (user_id, machine_id, date, hour, minutes_before)
-                );
-            """)
-    else:
-        with get_conn() as conn:
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS reminders_sent (
-                    user_id INTEGER NOT NULL,
-                    machine_id INTEGER NOT NULL,
-                    date TEXT NOT NULL,
-                    hour INTEGER NOT NULL,
-                    minutes_before INTEGER NOT NULL,
-                    sent_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now')),
-                    UNIQUE (user_id, machine_id, date, hour, minutes_before)
-                );
-            """)
-'''
+
 def ensure_reminders_table():
     """
     Таблица для антидубликатов напоминаний.
@@ -274,11 +274,11 @@ def ensure_reminders_table():
     """
     with get_conn() as conn:
         # На случай старой схемы — пересоздаём таблицу.
-        conn.execute("DROP TABLE IF EXISTS reminders_sent")
+        #conn.execute("DROP TABLE IF EXISTS reminders_sent")
 
         if DATABASE_URL:
             conn.execute("""
-                CREATE TABLE reminders_sent (
+                CREATE TABLE IF NOT EXISTS reminders_sent (
                     tg_id          BIGINT      NOT NULL,
                     machine_id     INTEGER     NOT NULL,
                     date           DATE        NOT NULL,
@@ -290,7 +290,7 @@ def ensure_reminders_table():
             """)
         else:
             conn.execute("""
-                CREATE TABLE reminders_sent (
+                CREATE TABLE IF NOT EXISTS reminders_sent (
                     tg_id          INTEGER     NOT NULL,
                     machine_id     INTEGER     NOT NULL,
                     date           TEXT        NOT NULL,
@@ -300,6 +300,7 @@ def ensure_reminders_table():
                     PRIMARY KEY (tg_id, machine_id, date, hour, minutes_before)
                 );
             """)
+
 
 # ---------- инициализация схемы ----------
 def init_db():
@@ -391,8 +392,18 @@ def ensure_ban_tables():
                     last_attempt TIMESTAMPTZ DEFAULT now()
                 );
             """)
-            conn.execute("ALTER TABLE banned ALTER COLUMN tg_id TYPE BIGINT USING tg_id::bigint;")
-            conn.execute("ALTER TABLE failed_attempts ALTER COLUMN tg_id TYPE BIGINT USING tg_id::bigint;")
+            try:
+                conn.execute("ALTER TABLE banned ALTER COLUMN tg_id TYPE BIGINT USING tg_id::bigint;")
+            except Exception:
+                pass
+
+            try:
+                conn.execute("ALTER TABLE failed_attempts ALTER COLUMN tg_id TYPE BIGINT USING tg_id::bigint;")
+            except Exception:
+                pass
+
+            #conn.execute("ALTER TABLE banned ALTER COLUMN tg_id TYPE BIGINT USING tg_id::bigint;")
+            #conn.execute("ALTER TABLE failed_attempts ALTER COLUMN tg_id TYPE BIGINT USING tg_id::bigint;")
     else:
         with get_conn() as conn:
             conn.execute("""
@@ -527,9 +538,17 @@ def get_incomplete_users():
         """).fetchall()
 
 # ---------- машины/бронирования ----------
+'''
 def add_machine(type_, name):
     with get_conn() as conn:
         conn.execute("INSERT INTO machines (type, name) VALUES (?, ?)", (type_, name))
+'''
+def add_machine(type_, name):
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT OR IGNORE INTO machines (type, name) VALUES (?, ?)",
+            (type_, name)
+        )
 
 def get_machines_by_type(type_):
     with get_conn() as conn:
@@ -605,22 +624,3 @@ def mark_reminder_sent(
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(tg_id, machine_id, date, hour, minutes_before) DO NOTHING
         """, (tg_id, machine_id, date_iso, hour, minutes_before))
-
-'''
-def was_reminder_sent(user_id: int, machine_id: int, date_iso: str, hour: int, minutes_before: int) -> bool:
-    with get_conn() as conn:
-        row = conn.execute("""
-            SELECT 1 FROM reminders_sent
-             WHERE user_id=? AND machine_id=? AND date=? AND hour=? AND minutes_before=?
-             LIMIT 1
-        """, (user_id, machine_id, date_iso, hour, minutes_before)).fetchone()
-    return bool(row)
-
-def mark_reminder_sent(user_id: int, machine_id: int, date_iso: str, hour: int, minutes_before: int):
-    with get_conn() as conn:
-        conn.execute("""
-            INSERT INTO reminders_sent (user_id, machine_id, date, hour, minutes_before)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(user_id, machine_id, date, hour, minutes_before) DO NOTHING
-        """, (user_id, machine_id, date_iso, hour, minutes_before))
-'''

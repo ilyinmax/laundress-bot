@@ -55,10 +55,10 @@ def setup_scheduler():
         scheduler.add_job(
             watchdog_tick,
             trigger="interval",
-            seconds=600,
+            seconds=60,
             id="watchdog_reminders",
             replace_existing=True,
-            misfire_grace_time=300,
+            misfire_grace_time=3600,
         )
         scheduler.start()
     return scheduler
@@ -92,7 +92,10 @@ async def schedule_reminder(
             await send_reminder(tg_id, machine_name, d.isoformat(), hour, minutes_before)
         return
 
-    job_id = f"rem_{tg_id}_{d.isoformat()}_{hour}"
+    safe_name = str(machine_name).replace(" ", "_")
+    job_id = f"rem_{tg_id}_{safe_name}_{d.isoformat()}_{hour}_{minutes_before}"
+
+    #job_id = f"rem_{tg_id}_{d.isoformat()}_{hour}"
     scheduler.add_job(
         send_reminder,
         trigger=DateTrigger(run_date=reminder_dt),
@@ -109,6 +112,7 @@ async def send_reminder(
     date_iso: str,
     hour: int,
     minutes_before: int,
+    allow_late: bool = False
 ):
     """
     Отправка напоминания. tg_id — Telegram ID.
@@ -124,10 +128,23 @@ async def send_reminder(
     )
     reminder_dt = slot_dt - timedelta(minutes=minutes_before)
 
+    # слишком рано
+    if now < reminder_dt:
+        return
+
+    if allow_late:
+        # шлём “догоняющее” напоминание до начала слота
+        if now >= slot_dt:
+            return
+    else:
+        # строгая политика: только в окне LATE_WINDOW_SEC
+        if (now - reminder_dt).total_seconds() > LATE_WINDOW_SEC:
+            return
+    '''
     # сильно опоздали — выходим
     if (now - reminder_dt).total_seconds() > LATE_WINDOW_SEC:
         return
-
+    '''
     if BOT_REF is None:
         return
 
@@ -217,7 +234,7 @@ async def send_reminder(
         # молча, если не удалось отправить
         pass
     '''
-        # 1) сначала пробуем отправить сообщение
+    # 1) сначала пробуем отправить сообщение
     try:
         await BOT_REF.send_message(tg_id, text, parse_mode="HTML")
     except Exception:
@@ -225,8 +242,7 @@ async def send_reminder(
         # просто выходим, чтобы не спамить ретраями
         return
 
-        # 2) затем фиксируем факт отправки в БД (без try/except, чтобы
-        # возможная ошибка была видна в логах и не ломала антидубли)
+    # 2) затем фиксируем факт отправки в БД (без try/except, чтобы
     mark_reminder_sent(tg_id, m_id, date_iso, hour, minutes_before)
 
 
@@ -348,6 +364,25 @@ async def watchdog_tick(minutes_before: int = 30):
 
         delta_sec = (now - reminder_dt).total_seconds()
 
+        # вместо окна 0..LATE_WINDOW_SEC
+        if reminder_dt <= now < slot_dt:
+            if not was_reminder_sent(
+                    int(tg_id),
+                    int(machine_id),
+                    str(date_iso),
+                    int(hour),
+                    minutes_before,
+            ):
+                await send_reminder(
+                    int(tg_id),
+                    m_name,
+                    str(date_iso),
+                    int(hour),
+                    minutes_before,
+                    allow_late=True
+                )
+
+        '''
         # окно «пора напоминать»: [reminder_dt, reminder_dt + LATE_WINDOW_SEC]
         if 0 <= delta_sec <= LATE_WINDOW_SEC:
             if not was_reminder_sent(
@@ -364,3 +399,4 @@ async def watchdog_tick(minutes_before: int = 30):
                     int(hour),
                     minutes_before,
                 )
+        '''

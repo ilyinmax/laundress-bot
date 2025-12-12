@@ -1,4 +1,4 @@
-# admin.py — импортЫ
+# admin.py
 import os
 import asyncio
 from datetime import datetime, timedelta

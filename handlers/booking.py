@@ -15,6 +15,7 @@ from database import (
     get_user_bookings_today,
     get_free_hours,
     create_booking,
+    DBUnavailable
 )
 from sqlite3 import IntegrityError  # для SQLite
 
@@ -125,58 +126,63 @@ def _free_hours_for_machine_on_date(machine_id: int, date_iso: str) -> list[int]
 async def choose_date_first(
     msg: types.Message, user_id: int | None = None, edit: bool = False
 ):
-    uid = user_id or (msg.chat.id if getattr(msg, "chat", None) else msg.from_user.id)
-    if is_banned(uid):
-        # подтянем срок/причину, чтобы красиво показать
-        with get_conn() as conn:
-            row = conn.execute(
-                "SELECT banned_until, reason FROM banned WHERE tg_id=?", (uid,)
-            ).fetchone()
-        until_txt = ""
-        if row and row[0]:
-            try:
-                from datetime import datetime as _dt
+    try:
+        uid = user_id or (msg.chat.id if getattr(msg, "chat", None) else msg.from_user.id)
+        if is_banned(uid):
+            # подтянем срок/причину, чтобы красиво показать
+            with get_conn() as conn:
+                row = conn.execute(
+                    "SELECT banned_until, reason FROM banned WHERE tg_id=?", (uid,)
+                ).fetchone()
+            until_txt = ""
+            if row and row[0]:
+                try:
+                    from datetime import datetime as _dt
 
-                until_txt = _dt.fromisoformat(row[0]).strftime("%d.%m %H:%M")
-            except Exception:
-                until_txt = row[0]
-        reason = (row[1] or "").strip() if row else ""
-        text = "🚫 Вы заблокированы."
-        if until_txt:
-            text += f" До {until_txt}."
-        if reason:
-            text += f"\nПричина: {reason}"
-        return await msg.answer(text)
+                    until_txt = _dt.fromisoformat(row[0]).strftime("%d.%m %H:%M")
+                except Exception:
+                    until_txt = row[0]
+            reason = (row[1] or "").strip() if row else ""
+            text = "🚫 Вы заблокированы."
+            if until_txt:
+                text += f" До {until_txt}."
+            if reason:
+                text += f"\nПричина: {reason}"
+            return await msg.answer(text)
 
-    user = get_user(uid)
-    if not user or not (user[2] and user[3]):
+        user = get_user(uid)
+        if not user or not (user[2] and user[3]):
+            return await msg.answer(
+                "Сначала завершите регистрацию: /start → фамилия и номер комнаты."
+            )
+
+        now = now_local()
+        today = now.date()
+        start_offset = 1 if now.hour >= 23 else 0  # после 23:00 «сегодня» скрываем
+
+        days_buttons = []
+        for i in range(start_offset, start_offset + 3):
+            d = today + timedelta(days=i)
+            d_iso = d.isoformat()
+            free_wash, free_dry = _free_per_type_for_date(d_iso)
+            caption = f"📅 {d.strftime('%d.%m')} — 🧺 {free_wash} / 🌬️ {free_dry}"
+            days_buttons.append(
+                [InlineKeyboardButton(text=caption, callback_data=f"date_{d_iso}")]
+            )
+
+        kb = InlineKeyboardMarkup(inline_keyboard=days_buttons)
+        text = "Выберите дату:"
+
+        if edit:
+            # используем safe_edit, он сам игнорирует "message is not modified"
+            await safe_edit(msg, text=text, reply_markup=kb, parse_mode=None)
+        else:
+            await msg.answer(text, reply_markup=kb)
+    except DBUnavailable:
         return await msg.answer(
-            "Сначала завершите регистрацию: /start → фамилия и номер комнаты."
+            "⏳ База данных сейчас просыпается, бот жив.\n"
+            "Просто повторите /book ещё раз."
         )
-
-    now = now_local()
-    today = now.date()
-    start_offset = 1 if now.hour >= 23 else 0  # после 23:00 «сегодня» скрываем
-
-    days_buttons = []
-    for i in range(start_offset, start_offset + 3):
-        d = today + timedelta(days=i)
-        d_iso = d.isoformat()
-        free_wash, free_dry = _free_per_type_for_date(d_iso)
-        caption = f"📅 {d.strftime('%d.%m')} — 🧺 {free_wash} / 🌬️ {free_dry}"
-        days_buttons.append(
-            [InlineKeyboardButton(text=caption, callback_data=f"date_{d_iso}")]
-        )
-
-    kb = InlineKeyboardMarkup(inline_keyboard=days_buttons)
-    text = "Выберите дату:"
-
-    if edit:
-        # используем safe_edit, он сам игнорирует "message is not modified"
-        await safe_edit(msg, text=text, reply_markup=kb, parse_mode=None)
-    else:
-        await msg.answer(text, reply_markup=kb)
-
 
 async def _show_machines_for_date(message: Message, date: str):
     """Текст + кнопки по всем машинам на выбранную дату."""
