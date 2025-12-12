@@ -11,6 +11,9 @@ from database import init_db, add_machine, get_machines_by_type, DBUnavailable
 from config import WASHING_MACHINES, DRYERS
 from scheduler import setup_scheduler, rebuild_reminders_for_horizon, attach_bot
 
+REMINDERS_TASK: asyncio.Task | None = None
+WH_RETRY_TASK: asyncio.Task | None = None
+
 '''
 def ensure_config_machines():
     # добавим стиралки, если их ещё нет
@@ -111,10 +114,18 @@ async def background_init(app: web.Application):
         app["ready"].set()
         print("✅ Init: ready")
 
+        global REMINDERS_TASK, WH_RETRY_TASK
+
+        REMINDERS_TASK = asyncio.create_task(
+            rebuild_reminders_for_horizon(hours=48, minutes_before=30)
+        )
+
+        '''
         # НЕ критично: восстанавливаем напоминания отдельной задачей
         app["reminders_task"] = asyncio.create_task(
             rebuild_reminders_for_horizon(hours=48, minutes_before=30)
         )
+        '''
 
         # Ставим вебхук
         try:
@@ -122,7 +133,9 @@ async def background_init(app: web.Application):
             print(f"✅ Webhook установлен: {WEBHOOK_URL}")
         except Exception as e:
             print(f"⚠️ Не удалось поставить вебхук на старте: {e}. Запускаю ретраи.")
-            app["wh_retry_task"] = asyncio.create_task(_retry_set_webhook(bot, WEBHOOK_URL))
+            WH_RETRY_TASK = asyncio.create_task(_retry_set_webhook(bot, WEBHOOK_URL))
+
+            #app["wh_retry_task"] = asyncio.create_task(_retry_set_webhook(bot, WEBHOOK_URL))
 
     except Exception as e:
         # ready НЕ ставим → /webhook будет отдавать 503, Telegram будет ретраить
@@ -136,6 +149,26 @@ async def on_startup(app: web.Application):
 
 
 async def on_cleanup(app: web.Application):
+    # Остановить init_task (если ещё идёт)
+    t = app.get("init_task")
+    if t and not t.done():
+        t.cancel()
+        try:
+            await t
+        except asyncio.CancelledError:
+            pass
+
+    # Остановить глобальные фоновые задачи
+    for task in (WH_RETRY_TASK, REMINDERS_TASK):
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+
+    '''
     # Гасим фоновые задачи
     for key in ("wh_retry_task", "reminders_task", "init_task"):
         task = app.get(key)
@@ -144,8 +177,8 @@ async def on_cleanup(app: web.Application):
             try:
                 await task
             except asyncio.CancelledError:
-                pass
-
+                pass     
+    '''
     # (опционально) гасим APScheduler, если он был запущен
     try:
         from scheduler import scheduler as _sched  # noqa: E402
