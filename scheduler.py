@@ -52,6 +52,7 @@ def setup_scheduler():
             replace_existing=True,
         )
         # сторож: каждую минуту проверяем, не пришло ли время напоминания
+        '''
         scheduler.add_job(
             watchdog_tick,
             trigger="interval",
@@ -60,6 +61,7 @@ def setup_scheduler():
             replace_existing=True,
             misfire_grace_time=3600,
         )
+        '''
         scheduler.start()
     return scheduler
 
