@@ -304,11 +304,15 @@ async def _show_machines_for_date(message: Message, date: str):
     await safe_edit(message, text=text, reply_markup=kb)
 '''
 
+
+
 async def _show_machines_for_date(message: Message, date: str):
+    """Текст + кнопки по всем машинам на выбранную дату."""
     with get_conn() as conn:
-        machines = conn.execute(
-            "SELECT id, type, name FROM machines ORDER BY type, id"
-        ).fetchall()
+        cur = conn.execute(
+            "SELECT id, type, name FROM machines ORDER BY type, name"
+        )
+        machines = cur.fetchall()  # (id, 'wash'|'dry', name)
 
     if not machines:
         kb = InlineKeyboardMarkup(
