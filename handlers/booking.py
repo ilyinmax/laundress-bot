@@ -99,7 +99,9 @@ def _free_per_type_for_date(date_iso: str) -> tuple[int, int]:
     today_iso = now.date().isoformat()
 
     with get_conn() as conn:
-        machines = conn.execute("SELECT id, type FROM machines").fetchall()
+        machines = conn.execute(
+            "SELECT id, type FROM machines WHERE is_active"
+        ).fetchall()
 
     busy = _busy_map_for_date(date_iso)
 
@@ -310,7 +312,7 @@ async def _show_machines_for_date(message: Message, date: str):
     """Текст + кнопки по всем машинам на выбранную дату."""
     with get_conn() as conn:
         cur = conn.execute(
-            "SELECT id, type, name FROM machines ORDER BY type, name"
+            "SELECT id, type, name FROM machines WHERE is_active ORDER BY type, name"
         )
         machines = cur.fetchall()  # (id, 'wash'|'dry', name)
 
@@ -418,12 +420,17 @@ async def choose_hour(callback: types.CallbackQuery):
 
     with get_conn() as conn:
         cur = conn.execute(
-            "SELECT type, name FROM machines WHERE id=?", (machine_id,)
+            "SELECT type, name, is_active FROM machines WHERE id=?", (machine_id,)
         )
         row = cur.fetchone()
     if not row:
         return await safe_edit(callback.message, text="Ошибка: машина не найдена.")
-    machine_type, machine_name = row
+    machine_type, machine_name, is_active = row
+    if not is_active:
+        return await safe_edit(
+            callback.message,
+            text="⚠️ Эта машина сейчас недоступна для записи. Выберите другую.",
+        )
 
     with get_conn() as conn:
         busy_rows = conn.execute(
@@ -625,7 +632,7 @@ async def finalize(callback: types.CallbackQuery):
             if not get_user_bookings_today(user[0], date_str, "dry"):
                 with get_conn() as conn:
                     cur = conn.execute(
-                        "SELECT id, name FROM machines WHERE type='dry' ORDER BY id"
+                        "SELECT id, name FROM machines WHERE type='dry' AND is_active ORDER BY id"
                     )
                     dryers = cur.fetchall()
                 for dry_id, dry_name in dryers:

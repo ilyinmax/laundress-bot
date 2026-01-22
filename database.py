@@ -72,6 +72,29 @@ def get_machine_id_by_name(name: str) -> int | None:
         row = conn.execute("SELECT id FROM machines WHERE name=?", (name,)).fetchone()
         return row[0] if row else None
 
+def set_machine_active(machine_id: int, active: bool) -> None:
+    """
+    Включить/выключить машину.
+    active=True  → машина доступна в /book
+    active=False → скрыта из записи, но старые записи и напоминания живут.
+    """
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE machines SET is_active=? WHERE id=?",
+            (bool(active), machine_id),
+        )
+
+
+def get_all_machines():
+    """
+    Все машины для админки (и активные, и выключенные).
+    """
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT id, type, name, is_active FROM machines ORDER BY type, name"
+        ).fetchall()
+
+
 # ---------- выбор backend: Postgres или SQLite ----------
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
@@ -371,6 +394,28 @@ def ensure_reminders_table():
                 );
             """)
 
+def ensure_machines_active_column():
+    """
+    Добавляем колонку is_active в таблицу machines, если её ещё нет.
+    TRUE / 1 = машина работает и доступна в /book.
+    """
+    with get_conn() as conn:
+        if DATABASE_URL:
+            # Postgres: есть IF NOT EXISTS
+            conn.execute("""
+                ALTER TABLE machines
+                ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;
+            """)
+        else:
+            # SQLite: IF NOT EXISTS нет, просто ловим ошибку «duplicate column name»
+            try:
+                conn.execute("""
+                    ALTER TABLE machines
+                    ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1;
+                """)
+            except Exception:
+                pass
+
 
 # ---------- инициализация схемы ----------
 def init_db():
@@ -442,6 +487,7 @@ def init_db():
         for stmt in ddl: conn.execute(stmt)
     ensure_ban_tables()
     ensure_reminders_table()
+    ensure_machines_active_column()
 
 # ---------- бан/антиспам ----------
 def ensure_ban_tables():
@@ -619,10 +665,18 @@ def add_machine(type_, name):
             "INSERT OR IGNORE INTO machines (type, name) VALUES (?, ?)",
             (type_, name)
         )
-
+'''
 def get_machines_by_type(type_):
     with get_conn() as conn:
         return conn.execute("SELECT id, type, name FROM machines WHERE type=?", (type_,)).fetchall()
+'''
+
+def get_machines_by_type(type_):
+    with get_conn() as conn:
+        return conn.execute(
+            "SELECT id, type, name FROM machines WHERE type=? AND is_active",
+            (type_,)
+        ).fetchall()
 
 def get_user_bookings_today(user_id, date_iso, machine_type):
     with get_conn() as conn:

@@ -19,6 +19,7 @@ from database import (
     ensure_user_by_surname_room, get_machine_id_by_name, create_booking,
     ban_user, unban_user, tg_id_by_username,
     get_user_bookings_today, get_free_hours, is_admin, get_incomplete_users,
+    set_machine_active, get_all_machines,
 )
 from config import ADMIN_IDS
 
@@ -527,18 +528,65 @@ async def cmd_abookfio(msg: types.Message):
         text += f"\nКомментарий: {comment}"
     await msg.answer(text)
 
+def _machines_admin_view():
+    """
+    Текст + клавиатура для управления машинами.
+    """
+    rows = get_all_machines()
+    if not rows:
+        return "Машины не настроены.", None
+
+    lines = ["Список машин:\n"]
+    kb_rows: list[list[InlineKeyboardButton]] = []
+
+    for mid, t, name, is_active in rows:
+        kind = "стиралка" if t == "wash" else "сушилка"
+        status = "🟢 работает" if is_active else "🔴 выключена"
+        lines.append(f"#{mid} — {name} ({kind}), {status}")
+
+        toggle_text = "⛔️ Выключить" if is_active else "✅ Включить"
+        kb_rows.append([
+            InlineKeyboardButton(
+                text=f"{toggle_text} {name}",
+                callback_data=f"admin_mtoggle_{mid}_{0 if is_active else 1}",
+            )
+        ])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=kb_rows)
+    return "\n".join(lines), kb
+
 @router.message(Command("machines"))
 async def cmd_machines(msg: types.Message):
     if not is_admin(msg.from_user.id):
         return await msg.answer("🚫 Нет прав администратора.")
-    with get_conn() as conn:
-        rows = conn.execute("SELECT id, type, name FROM machines ORDER BY type, name").fetchall()
-    if not rows:
-        return await msg.answer("Машины не настроены.")
-    lines = ["Список машин:\n"]
-    for mid, t, name in rows:
-        lines.append(f"#{mid} — {name} ({'стиралка' if t=='wash' else 'сушилка'})")
-    await msg.answer("\n".join(lines))
+
+    text, kb = _machines_admin_view()
+    if kb is None:
+        return await msg.answer(text)
+    await msg.answer(text, reply_markup=kb)
+
+@router.callback_query(F.data.startswith("admin_mtoggle_"))
+async def admin_toggle_machine(callback: types.CallbackQuery):
+    await callback.answer()
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("🚫 Нет доступа.", show_alert=True)
+
+    try:
+        _, _, mid_str, active_str = callback.data.split("_", 3)
+        mid = int(mid_str)
+        new_active = bool(int(active_str))   # 1 → включить, 0 → выключить
+    except Exception:
+        return await callback.answer("Некорректные данные кнопки.", show_alert=True)
+
+    set_machine_active(mid, new_active)
+
+    # перерисовываем список
+    text, kb = _machines_admin_view()
+    try:
+        await callback.message.edit_text(text, reply_markup=kb)
+    except Exception:
+        # на всякий случай, если текст не меняется
+        await callback.message.edit_reply_markup(reply_markup=kb)
 
 
 @router.message(Command("notify_incomplete"))
@@ -608,13 +656,30 @@ async def cmd_laundry_news(message: types.Message):
     if not is_admin(message.from_user.id):
         return await message.answer("🚫 Нет доступа.")
 
-    # текст рассылки
+    with get_conn() as conn:
+        wash = [name for (name,) in conn.execute(
+            "SELECT name FROM machines WHERE type='wash' AND is_active ORDER BY name"
+        ).fetchall()]
+        dry = [name for (name,) in conn.execute(
+            "SELECT name FROM machines WHERE type='dry' AND is_active ORDER BY name"
+        ).fetchall()]
+
+    def _short(names):
+        # превращаем 'Стиральная №3' → '№3', 'Сушилка №2' → '№2'
+        result = []
+        for n in names:
+            if "№" in n:
+                result.append(n[n.index("№"):].strip())
+            else:
+                result.append(n)
+        return ", ".join(result) if result else "нет"
+
     text = (
-        "Отличные новости по прачечной 🎉\n"
+      #  "Отличные новости по прачечной 🎉\n"
         "Рабочие машины:\n"
-        "🧺 стиралки – №1, 3, 6\n"
-        "🌬 сушилки – №2, 4\n"
-        "Пользуемся и бережём машинки 🙏"
+        f"🧺 стиралки – {_short(wash)}\n"
+        f"🌬 сушилки – {_short(dry)}\n"
+      #  "Пользуемся и бережём машинки 🙏"
     )
 
     # берём всех пользователей бота
