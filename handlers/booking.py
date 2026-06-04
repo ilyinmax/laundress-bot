@@ -1,3 +1,5 @@
+CLOSED_DATES = {"2026-06-05", "2026-06-06"}
+
 from aiogram import Router, types, F
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, Message
 from aiogram.exceptions import TelegramBadRequest
@@ -214,6 +216,10 @@ async def choose_date_first(
         for i in range(start_offset, start_offset + 3):
             d = today + timedelta(days=i)
             d_iso = d.isoformat()
+
+            if d_iso in CLOSED_DATES:
+                continue
+
             free_wash, free_dry = _free_per_type_for_date(d_iso)
             caption = f"📅 {d.strftime('%d.%m')} — 🧺 {free_wash} / 🌬️ {free_dry}"
             days_buttons.append(
@@ -310,6 +316,12 @@ async def _show_machines_for_date(message: Message, date: str):
 
 async def _show_machines_for_date(message: Message, date: str):
     """Текст + кнопки по всем машинам на выбранную дату."""
+    if date in CLOSED_DATES:
+        return await safe_edit(
+            message,
+            text="⛔ На эту дату запись временно закрыта."
+        )
+
     with get_conn() as conn:
         cur = conn.execute(
             "SELECT id, type, name FROM machines WHERE is_active ORDER BY type, name"
@@ -417,6 +429,12 @@ async def choose_hour(callback: types.CallbackQuery):
         machine_id = int(machine_id_str)
     except Exception:
         return await safe_edit(callback.message, text="⚠️ Неверные данные запроса.")
+
+    if date in CLOSED_DATES:
+        return await safe_edit(
+            callback.message,
+            text="⛔ На эту дату запись временно закрыта."
+        )
 
     with get_conn() as conn:
         cur = conn.execute(
@@ -567,6 +585,12 @@ async def finalize(callback: types.CallbackQuery):
                 f"⚠️ Вы уже записаны на {type_text} в этот день!\n"
                 f"Можно только одну запись на каждый тип машины в сутки."
             ),
+        )
+
+    if date_str in CLOSED_DATES:
+        return await safe_edit(
+            callback.message,
+            text="⛔ На эту дату запись временно закрыта."
         )
 
     try:
