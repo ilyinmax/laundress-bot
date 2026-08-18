@@ -3,17 +3,10 @@ from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefaul
 
 from config import ADMIN_IDS
 from handlers.admin_access import (
-    ROOT_ADMIN_IDS,
     is_root_admin,
-    router as admin_access_router,
     sync_dynamic_admins,
 )
 from handlers import admin_extra as admin_extra_module
-
-
-# Подключаем команды управления администраторами к существующему admin_extra router.
-# Так не нужно менять bot.py/webhook_app.py: они уже подключают admin_extra.
-admin_extra_module.router.include_router(admin_access_router)
 
 # Дополняем экран «📚 Все команды» новыми root-only командами.
 if "/addadmin" not in admin_extra_module.ADMIN_COMMANDS_TEXT:
