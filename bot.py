@@ -6,6 +6,7 @@ from database import init_db, add_machine, get_machines_by_type
 from scheduler import setup_scheduler, schedule_reminder
 
 from handlers import registration, booking, admin_extra, admin
+from handlers.bot_commands import setup_bot_commands
 from database import init_db
 init_db()
 
@@ -31,6 +32,10 @@ async def main():
     dp.include_router(admin.router)
 
     await bot.delete_webhook(drop_pending_updates=True)
+    try:
+        await setup_bot_commands(bot)
+    except Exception as exc:
+        print(f"⚠️ Не удалось обновить меню команд: {exc}")
 
     setup_scheduler()
     print("Бот запущен 🚀")
