@@ -10,6 +10,7 @@ from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_applicati
 from database import init_db, add_machine, get_machines_by_type, DBUnavailable
 from config import WASHING_MACHINES, DRYERS
 from scheduler import setup_scheduler, rebuild_reminders_for_horizon, attach_bot
+from handlers.bot_commands import setup_bot_commands
 
 REMINDERS_TASK: asyncio.Task | None = None
 WH_RETRY_TASK: asyncio.Task | None = None
@@ -61,9 +62,12 @@ dp = Dispatcher()
 # === Подключаем твои роутеры ===
 from handlers.registration import router as registration_router  # noqa: E402
 from handlers.booking import router as booking_router  # noqa: E402
+from handlers.admin_extra import router as admin_extra_router  # noqa: E402
 from handlers.admin import router as admin_router  # noqa: E402
 
-dp.include_routers(registration_router, booking_router, admin_router)
+# admin_extra должен идти перед старым admin_router: он расширяет /admin,
+# а все старые callback-команды продолжают обслуживаться admin.py.
+dp.include_routers(registration_router, booking_router, admin_extra_router, admin_router)
 
 
 # === /health для Render и пингов ===
@@ -109,6 +113,11 @@ async def background_init(app: web.Application):
 
         setup_scheduler()
         attach_bot(bot)
+
+        try:
+            await setup_bot_commands(bot)
+        except Exception as exc:
+            print(f"⚠️ Не удалось обновить меню команд: {exc}")
 
         # Теперь можно принимать апдейты: таблицы/машины/планировщик готовы
         app["ready"].set()
