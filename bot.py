@@ -5,7 +5,7 @@ from config import BOT_TOKEN, WASHING_MACHINES, DRYERS
 from database import init_db, add_machine, get_machines_by_type
 from scheduler import setup_scheduler, schedule_reminder
 
-from handlers import registration, booking, admin
+from handlers import registration, booking, admin_extra, admin
 from database import init_db
 init_db()
 
@@ -25,6 +25,9 @@ async def main():
 
     dp.include_router(registration.router)
     dp.include_router(booking.router)
+    # Новая админ-панель должна идти раньше старого admin.py,
+    # чтобы перехватить /admin и добавить раннюю запись, не ломая старые callback'и.
+    dp.include_router(admin_extra.router)
     dp.include_router(admin.router)
 
     await bot.delete_webhook(drop_pending_updates=True)
