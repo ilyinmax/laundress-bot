@@ -2,6 +2,27 @@ from aiogram import Bot
 from aiogram.types import BotCommand, BotCommandScopeChat, BotCommandScopeDefault
 
 from config import ADMIN_IDS
+from handlers.admin_access import (
+    ROOT_ADMIN_IDS,
+    is_root_admin,
+    router as admin_access_router,
+    sync_dynamic_admins,
+)
+from handlers import admin_extra as admin_extra_module
+
+
+# Подключаем команды управления администраторами к существующему admin_extra router.
+# Так не нужно менять bot.py/webhook_app.py: они уже подключают admin_extra.
+admin_extra_module.router.include_router(admin_access_router)
+
+# Дополняем экран «📚 Все команды» новыми root-only командами.
+if "/addadmin" not in admin_extra_module.ADMIN_COMMANDS_TEXT:
+    admin_extra_module.ADMIN_COMMANDS_TEXT += """
+
+<b>Управление администраторами (только постоянные админы):</b>
+/addadmin @username — выдать права администратора
+/deladmin @username — забрать выданные права
+/admins — показать всех администраторов"""
 
 
 USER_COMMANDS = [
@@ -29,6 +50,12 @@ ADMIN_ONLY_COMMANDS = [
     BotCommand(command="laundry_news", description="Разослать список работающих машин"),
 ]
 
+ROOT_ONLY_COMMANDS = [
+    BotCommand(command="addadmin", description="Добавить администратора по @username"),
+    BotCommand(command="deladmin", description="Удалить добавленного администратора"),
+    BotCommand(command="admins", description="Список администраторов бота"),
+]
+
 
 def _admin_ids() -> list[int]:
     raw = ADMIN_IDS
@@ -41,23 +68,51 @@ def _admin_ids() -> list[int]:
     result: list[int] = []
     for item in items:
         try:
-            result.append(int(item))
+            value = int(item)
         except (TypeError, ValueError):
             continue
+        if value not in result:
+            result.append(value)
     return result
 
 
+def _commands_for_admin(admin_id: int) -> list[BotCommand]:
+    commands = USER_COMMANDS + ADMIN_ONLY_COMMANDS
+    if is_root_admin(admin_id):
+        commands += ROOT_ONLY_COMMANDS
+    return commands
+
+
+async def set_admin_commands_for_chat(bot: Bot, admin_id: int) -> None:
+    """Сразу показывает нужный slash-список конкретному администратору."""
+    await bot.set_my_commands(
+        _commands_for_admin(int(admin_id)),
+        scope=BotCommandScopeChat(chat_id=int(admin_id)),
+    )
+
+
+async def remove_admin_commands_for_chat(bot: Bot, user_id: int) -> None:
+    """Убирает персональный admin-scope; пользователь снова видит default-команды."""
+    await bot.delete_my_commands(scope=BotCommandScopeChat(chat_id=int(user_id)))
+
+
 async def setup_bot_commands(bot: Bot) -> None:
-    """Обычным пользователям показываем только их команды, админам — полный набор."""
+    """
+    Обычным пользователям показываем только пользовательские команды.
+    Постоянным и добавленным администраторам — персональный полный набор.
+    """
+    # До настройки Telegram scope загружаем динамические права из БД в ADMIN_IDS,
+    # чтобы database.is_admin() после перезапуска сразу видел добавленных админов.
+    try:
+        sync_dynamic_admins()
+    except Exception as exc:
+        print(f"⚠️ Не удалось загрузить динамических админов: {exc}")
+
     await bot.set_my_commands(USER_COMMANDS, scope=BotCommandScopeDefault())
 
-    admin_commands = USER_COMMANDS + ADMIN_ONLY_COMMANDS
     for admin_id in _admin_ids():
         try:
-            await bot.set_my_commands(
-                admin_commands,
-                scope=BotCommandScopeChat(chat_id=admin_id),
-            )
+            await set_admin_commands_for_chat(bot, admin_id)
         except Exception as exc:
             # Один недоступный chat_id не должен мешать запуску бота.
             print(f"⚠️ Не удалось установить команды для admin {admin_id}: {exc}")
