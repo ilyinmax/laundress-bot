@@ -61,9 +61,12 @@ dp = Dispatcher()
 # === Подключаем твои роутеры ===
 from handlers.registration import router as registration_router  # noqa: E402
 from handlers.booking import router as booking_router  # noqa: E402
+from handlers.admin_extra import router as admin_extra_router  # noqa: E402
 from handlers.admin import router as admin_router  # noqa: E402
 
-dp.include_routers(registration_router, booking_router, admin_router)
+# admin_extra должен идти перед старым admin_router: он расширяет /admin,
+# а все старые callback-команды продолжают обслуживаться admin.py.
+dp.include_routers(registration_router, booking_router, admin_extra_router, admin_router)
 
 
 # === /health для Render и пингов ===
