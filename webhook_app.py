@@ -59,15 +59,22 @@ session = AiohttpSession()
 bot = Bot(token=BOT_TOKEN, session=session)
 dp = Dispatcher()
 
-# === Подключаем твои роутеры ===
+# === Подключаем роутеры ===
 from handlers.registration import router as registration_router  # noqa: E402
 from handlers.booking import router as booking_router  # noqa: E402
+from handlers.admin_access import router as admin_access_router  # noqa: E402
 from handlers.admin_extra import router as admin_extra_router  # noqa: E402
 from handlers.admin import router as admin_router  # noqa: E402
 
-# admin_extra должен идти перед старым admin_router: он расширяет /admin,
-# а все старые callback-команды продолжают обслуживаться admin.py.
-dp.include_routers(registration_router, booking_router, admin_extra_router, admin_router)
+# Управление админами подключаем явно. admin_extra идёт перед старым admin_router,
+# чтобы расширять /admin, а старые callback-команды продолжали работать.
+dp.include_routers(
+    registration_router,
+    booking_router,
+    admin_access_router,
+    admin_extra_router,
+    admin_router,
+)
 
 
 # === /health для Render и пингов ===
@@ -94,21 +101,13 @@ async def init_db_with_retries():
             ensure_config_machines()
             return
         except DBUnavailable as e:
-            # print(f"⏳ DB недоступна (Neon sleep): {e}. Повтор через {delay}s…")
             await asyncio.sleep(delay)
-            delay = min(delay * 2, 60)  # 1s → 2s → 4s → … → 60s
+            delay = min(delay * 2, 60)
 
 
 # === Фоновая инициализация бота ===
 async def background_init(app: web.Application):
     try:
-        # КРИТИЧНЫЙ МИНИМУМ: должен завершиться до приёма апдейтов
-        '''
-        init_db()
-        ensure_config_machines()
-        setup_scheduler()
-        attach_bot(bot)
-        '''
         await init_db_with_retries()
 
         setup_scheduler()
@@ -119,7 +118,6 @@ async def background_init(app: web.Application):
         except Exception as exc:
             print(f"⚠️ Не удалось обновить меню команд: {exc}")
 
-        # Теперь можно принимать апдейты: таблицы/машины/планировщик готовы
         app["ready"].set()
         print("✅ Init: ready")
 
@@ -129,14 +127,6 @@ async def background_init(app: web.Application):
             rebuild_reminders_for_horizon(hours=48, minutes_before=30)
         )
 
-        '''
-        # НЕ критично: восстанавливаем напоминания отдельной задачей
-        app["reminders_task"] = asyncio.create_task(
-            rebuild_reminders_for_horizon(hours=48, minutes_before=30)
-        )
-        '''
-
-        # Ставим вебхук
         try:
             await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=False, request_timeout=20)
             print(f"✅ Webhook установлен: {WEBHOOK_URL}")
@@ -144,21 +134,16 @@ async def background_init(app: web.Application):
             print(f"⚠️ Не удалось поставить вебхук на старте: {e}. Запускаю ретраи.")
             WH_RETRY_TASK = asyncio.create_task(_retry_set_webhook(bot, WEBHOOK_URL))
 
-            #app["wh_retry_task"] = asyncio.create_task(_retry_set_webhook(bot, WEBHOOK_URL))
-
     except Exception as e:
-        # ready НЕ ставим → /webhook будет отдавать 503, Telegram будет ретраить
         print(f"❌ Ошибка инициализации: {e}")
 
 
 # === on_startup / on_cleanup ===
 async def on_startup(app: web.Application):
-    # Стартуем инициализацию в фоне, но апдейты не примем, пока app["ready"] не set()
     app["init_task"] = asyncio.create_task(background_init(app))
 
 
 async def on_cleanup(app: web.Application):
-    # Остановить init_task (если ещё идёт)
     t = app.get("init_task")
     if t and not t.done():
         t.cancel()
@@ -167,7 +152,6 @@ async def on_cleanup(app: web.Application):
         except asyncio.CancelledError:
             pass
 
-    # Остановить глобальные фоновые задачи
     for task in (WH_RETRY_TASK, REMINDERS_TASK):
         if task and not task.done():
             task.cancel()
@@ -176,19 +160,6 @@ async def on_cleanup(app: web.Application):
             except asyncio.CancelledError:
                 pass
 
-
-    '''
-    # Гасим фоновые задачи
-    for key in ("wh_retry_task", "reminders_task", "init_task"):
-        task = app.get(key)
-        if task and not task.done():
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass     
-    '''
-    # (опционально) гасим APScheduler, если он был запущен
     try:
         from scheduler import scheduler as _sched  # noqa: E402
         if getattr(_sched, "running", False):
@@ -196,7 +167,6 @@ async def on_cleanup(app: web.Application):
     except Exception:
         pass
 
-    # Закрываем сессию бота
     await bot.session.close()
 
 
@@ -207,12 +177,10 @@ app["ready"] = asyncio.Event()
 app.on_startup.append(on_startup)
 app.on_cleanup.append(on_cleanup)
 
-# маршруты
 app.router.add_get("/health", health)
 
-# вебхук
 SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=WEBHOOK_PATH)
-setup_application(app, dp, bot=bot)  # корректное завершение
+setup_application(app, dp, bot=bot)
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", "10000"))
