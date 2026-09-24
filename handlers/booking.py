@@ -210,10 +210,15 @@ async def choose_date_first(
 
         now = now_local()
         today = now.date()
-        start_offset = 1 if now.hour >= 23 else 0  # после 23:00 «сегодня» скрываем
+
+        # До 23:00 показываем: сегодня, завтра, послезавтра.
+        # После 23:00 сегодняшний день скрываем, но новый дальний день
+        # не открываем раньше полуночи.
+        start_offset = 1 if now.hour >= 23 else 0
+        days_count = 2 if now.hour >= 23 else 3
 
         days_buttons = []
-        for i in range(start_offset, start_offset + 3):
+        for i in range(start_offset, start_offset + days_count):
             d = today + timedelta(days=i)
             d_iso = d.isoformat()
 
