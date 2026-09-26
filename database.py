@@ -719,7 +719,7 @@ def cleanup_old_bookings():
     """Keep bookings for 7 days, usage history for 30 days."""
     record_usage_history()
     today = datetime.now(TZ).date()
-    bookings_cutoff = today - timedelta(days=7)
+    bookings_cutoff = today - timedelta(days=6)
     usage_cutoff = datetime.now(TZ) - timedelta(days=30)
     offers_cutoff = datetime.now(TZ) - timedelta(days=30)
     with get_conn() as conn:
