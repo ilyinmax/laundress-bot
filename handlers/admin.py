@@ -18,7 +18,7 @@ from database import (
     get_conn, _b64d_try, init_db,
     ensure_user_by_surname_room, get_machine_id_by_name,
     ban_user, unban_user, tg_id_by_username,
-    get_user_bookings_today, daily_limit_reached, get_free_hours, is_admin, get_incomplete_users,
+    get_user_bookings_today, daily_limit_reached, get_free_hours, get_free_hours_effective, is_admin, get_incomplete_users,
     set_machine_active, get_all_machines,
 )
 from config import ADMIN_IDS
@@ -523,7 +523,7 @@ async def cmd_abookfio(msg: types.Message):
         return await msg.answer(f"⚠️ У пользователя уже есть запись на {t} в этот день.")
 
     # слот свободен?
-    free = get_free_hours(machine_id, date_iso)
+    free = get_free_hours_effective(machine_id, date_iso)
     if hour not in free:
         return await msg.answer("Этот час уже занят. Выберите другой.")
 
