@@ -604,6 +604,7 @@ def bind_stub_user_to_real(tg_id, surname, room):
 
         real_id = conn.execute("SELECT id FROM users WHERE tg_id=?", (tg_id,)).fetchone()[0]
         conn.execute("UPDATE bookings SET user_id=? WHERE user_id=?", (real_id, stub_id))
+        conn.execute("UPDATE laundry_usage_history SET user_id=? WHERE user_id=?", (real_id, stub_id))
         conn.execute("DELETE FROM users WHERE id=?", (stub_id,))
 
 def add_user(tg_id, surname, room):
