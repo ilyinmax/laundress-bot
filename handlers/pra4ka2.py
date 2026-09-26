@@ -12,6 +12,7 @@ from config import TIMEZONE, WORKING_HOURS
 from database import (
     get_conn,
     get_user,
+    is_banned,
     get_free_hours_effective,
     get_notification_settings,
     set_notification_setting,
@@ -118,6 +119,8 @@ async def home(msg: types.Message, state: FSMContext):
 @router.message(Command("book"))
 @router.message(F.text == "🧺 Записаться")
 async def start_booking(msg: types.Message, state: FSMContext):
+    if is_banned(msg.from_user.id):
+        return await msg.answer("🚫 Вы заблокированы и не можете записываться.", reply_markup=main_kb(msg.from_user.id))
     user = get_user(msg.from_user.id)
     if not user or not user[2] or not user[3]:
         return await msg.answer("Сначала завершите регистрацию через /start.")
@@ -379,6 +382,11 @@ def _waitlist_summary(tg_id: int) -> str:
 @router.message(F.text.startswith("🔔 Лист ожидания"))
 async def waitlist_home(msg: types.Message, state: FSMContext):
     await state.clear()
+    if is_banned(msg.from_user.id):
+        return await msg.answer("🚫 Вы заблокированы и не можете использовать лист ожидания.", reply_markup=main_kb(msg.from_user.id))
+    user = get_user(msg.from_user.id)
+    if not user or not user[2] or not user[3]:
+        return await msg.answer("Сначала завершите регистрацию через /start.")
     summary = _waitlist_summary(msg.from_user.id)
     if summary:
         rows = [
@@ -598,13 +606,17 @@ async def waitlist_confirm(msg: types.Message, state: FSMContext):
     if msg.text != "✅ Встать в очередь":
         return await msg.answer("Подтвердите заявку кнопкой ниже.")
     data = await state.get_data()
-    save_request(
-        msg.from_user.id,
-        data.get("intervals", []),
-        data.get("selected_machines", []),
-        bool(data.get("any_machine")),
-        data.get("mode"),
-    )
+    try:
+        save_request(
+            msg.from_user.id,
+            data.get("intervals", []),
+            data.get("selected_machines", []),
+            bool(data.get("any_machine")),
+            data.get("mode"),
+        )
+    except ValueError as exc:
+        await state.clear()
+        return await msg.answer(str(exc), reply_markup=main_kb(msg.from_user.id))
     await state.clear()
     await msg.answer(
         "✅ Вы добавлены в лист ожидания.\n\n"
@@ -835,3 +847,8 @@ async def quiet_end_chosen(msg: types.Message, state: FSMContext):
 @router.message(F.text == "⬅️ Назад")
 async def generic_back(msg: types.Message, state: FSMContext):
     await show_home(msg, state)
+
+
+@router.message(F.text == "ℹ️ Как работает лист ожидания")
+async def waitlist_info(msg: types.Message):
+    await msg.answer(HELP_TEXTS["ℹ️ Как работает лист ожидания"], parse_mode="HTML")
