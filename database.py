@@ -894,6 +894,8 @@ def ensure_pra4ka2_tables():
         "CREATE INDEX IF NOT EXISTS idx_waitlist_intervals_req ON waitlist_intervals(request_id)",
         "CREATE INDEX IF NOT EXISTS idx_holds_slot ON slot_holds(machine_id, date, hour, status)",
         "CREATE INDEX IF NOT EXISTS idx_holds_user ON slot_holds(user_id, status)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_holds_one_active_slot ON slot_holds(machine_id, date, hour) WHERE status='active'",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_holds_one_active_user ON slot_holds(user_id) WHERE status='active'",
         "CREATE INDEX IF NOT EXISTS idx_usage_user_time ON laundry_usage_history(user_id, occurred_at)",
         "CREATE INDEX IF NOT EXISTS idx_pending_notice ON pending_waitlist_notifications(sent, send_at)",
     ]
