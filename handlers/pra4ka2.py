@@ -109,6 +109,7 @@ async def home(msg: types.Message, state: FSMContext):
     await show_home(msg, state)
 
 
+@router.message(Command("book"))
 @router.message(F.text == "🧺 Записаться")
 async def start_booking(msg: types.Message, state: FSMContext):
     user = get_user(msg.from_user.id)
@@ -270,6 +271,7 @@ def future_bookings(tg_id: int):
     return out
 
 
+@router.message(Command("mybookings"))
 @router.message(F.text == "📋 Мои записи")
 async def my_bookings(msg: types.Message, state: FSMContext):
     await state.clear()
@@ -287,6 +289,7 @@ async def my_bookings(msg: types.Message, state: FSMContext):
     await msg.answer("\n".join(lines).rstrip(), parse_mode="HTML", reply_markup=main_kb(msg.from_user.id))
 
 
+@router.message(Command("cancel"))
 @router.message(F.text == "❌ Отменить запись")
 async def cancel_start(msg: types.Message, state: FSMContext):
     rows = future_bookings(msg.from_user.id)
@@ -655,6 +658,7 @@ async def toggle_notification_setting(msg: types.Message, state: FSMContext):
     await notification_settings(msg, state)
 
 
+@router.message(Command("help"))
 @router.message(F.text == "ℹ️ Помощь")
 async def help_home(msg: types.Message, state: FSMContext):
     await state.clear()
