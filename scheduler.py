@@ -279,7 +279,7 @@ async def send_reminder(
     try:
         await BOT_REF.send_message(tg_id, text, parse_mode="HTML")
     except Exception:
-        # если не смогли отправить (пользователь заблокировал бота и т.п.) —
+        # если не смогли отправить (пользователь заблокировал бота и т.п.) -
         # просто выходим, чтобы не спамить ретраями
         return
 
