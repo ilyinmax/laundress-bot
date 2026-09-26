@@ -13,9 +13,9 @@ if "/addadmin" not in admin_extra_module.ADMIN_COMMANDS_TEXT:
     admin_extra_module.ADMIN_COMMANDS_TEXT += """
 
 <b>Управление администраторами (только постоянные админы):</b>
-/addadmin @username — выдать права администратора
-/deladmin @username — забрать выданные права
-/admins — показать всех администраторов"""
+/addadmin @username - выдать права администратора
+/deladmin @username - забрать выданные права
+/admins - показать всех администраторов"""
 
 
 USER_COMMANDS = [
@@ -92,7 +92,7 @@ async def remove_admin_commands_for_chat(bot: Bot, user_id: int) -> None:
 async def setup_bot_commands(bot: Bot) -> None:
     """
     Обычным пользователям показываем только пользовательские команды.
-    Постоянным и добавленным администраторам — персональный полный набор.
+    Постоянным и добавленным администраторам - персональный полный набор.
     """
     # До настройки Telegram scope загружаем динамические права из БД в ADMIN_IDS,
     # чтобы database.is_admin() после перезапуска сразу видел добавленных админов.
