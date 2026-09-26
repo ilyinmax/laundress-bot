@@ -731,6 +731,22 @@ def cleanup_old_bookings():
             "DELETE FROM waitlist_offer_history WHERE created_at < ?",
             (offers_cutoff.isoformat(timespec="seconds"),),
         )
+        conn.execute(
+            "DELETE FROM slot_holds WHERE created_at < ? AND status<>'active'",
+            (offers_cutoff.isoformat(timespec="seconds"),),
+        )
+        conn.execute(
+            "DELETE FROM pending_waitlist_notifications WHERE created_at < ? AND sent=1",
+            (offers_cutoff.isoformat(timespec="seconds"),),
+        )
+        conn.execute(
+            "DELETE FROM waitlist_rounds WHERE target_date < ?",
+            ((today - timedelta(days=30)).isoformat(),),
+        )
+        conn.execute(
+            "DELETE FROM waitlist_requests WHERE status<>'active' AND updated_at < ?",
+            (offers_cutoff.isoformat(timespec="seconds"),),
+        )
 
 def was_reminder_sent(
     tg_id: int, machine_id: int, date_iso: str, hour: int, minutes_before: int
@@ -775,7 +791,7 @@ def ensure_pra4ka2_tables():
         """
         CREATE TABLE IF NOT EXISTS waitlist_requests (
             id INTEGER PRIMARY KEY,
-            user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
             mode TEXT NOT NULL DEFAULT 'notify',
             status TEXT NOT NULL DEFAULT 'active',
             any_machine INTEGER NOT NULL DEFAULT 1,
@@ -865,6 +881,7 @@ def ensure_pra4ka2_tables():
         )
         """,
         "CREATE INDEX IF NOT EXISTS idx_waitlist_status ON waitlist_requests(status, priority_since)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_waitlist_one_active_user ON waitlist_requests(user_id) WHERE status='active'",
         "CREATE INDEX IF NOT EXISTS idx_waitlist_intervals_req ON waitlist_intervals(request_id)",
         "CREATE INDEX IF NOT EXISTS idx_holds_slot ON slot_holds(machine_id, date, hour, status)",
         "CREATE INDEX IF NOT EXISTS idx_holds_user ON slot_holds(user_id, status)",
