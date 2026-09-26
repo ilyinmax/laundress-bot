@@ -132,6 +132,10 @@ def _insert_booking(
     if not active:
         raise InvalidBooking("Машина сейчас недоступна")
 
+    if DATABASE_URL:
+        lock_key = f"booking:{int(user_id)}:{str(date_iso)}:{str(mtype)}"
+        conn.execute("SELECT pg_advisory_xact_lock(hashtext(?))", (lock_key,))
+
     if not is_admin(int(user[0])):
         params = [int(user_id), str(date_iso), str(mtype)]
         sql = """
