@@ -6,7 +6,7 @@ from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
 from config import TIMEZONE, WORKING_HOURS
-from database import get_conn, get_user_bookings_today, get_free_hours_effective, is_admin
+from database import DATABASE_URL, get_conn, is_admin
 
 TZ = ZoneInfo(TIMEZONE)
 _BOOKING_LOCK = asyncio.Lock()
@@ -44,6 +44,12 @@ def slot_datetime(date_iso: str, hour: int) -> datetime:
     return datetime.combine(d, time(hour=int(hour)), tzinfo=TZ)
 
 
+def _booking_from_row(row) -> BookingResult:
+    bid, uid, mid, mtype, mname, d, h = row
+    ds = d.isoformat() if hasattr(d, "isoformat") else str(d)
+    return BookingResult(int(bid), int(uid), int(mid), str(mtype), str(mname), ds, int(h))
+
+
 def get_booking(booking_id: int) -> BookingResult | None:
     with get_conn() as conn:
         row = conn.execute(
@@ -55,11 +61,169 @@ def get_booking(booking_id: int) -> BookingResult | None:
             """,
             (int(booking_id),),
         ).fetchone()
-    if not row:
+    return _booking_from_row(row) if row else None
+
+
+def _begin(conn):
+    raw = getattr(conn, "_conn", None)
+    if raw is None:
         return None
-    bid, uid, mid, mtype, mname, d, h = row
-    ds = d.isoformat() if hasattr(d, "isoformat") else str(d)
-    return BookingResult(int(bid), int(uid), int(mid), str(mtype), str(mname), ds, int(h))
+    if DATABASE_URL:
+        raw.autocommit = False
+    else:
+        raw.execute("BEGIN IMMEDIATE")
+    return raw
+
+
+def _commit(raw):
+    if raw is not None:
+        raw.commit()
+
+
+def _rollback(raw):
+    if raw is not None:
+        try:
+            raw.rollback()
+        except Exception:
+            pass
+
+
+def _close_transaction(conn, raw):
+    if DATABASE_URL and raw is not None:
+        try:
+            raw.autocommit = True
+        except Exception:
+            pass
+    conn.close()
+
+
+def _insert_booking(
+    conn,
+    user_id: int,
+    machine_id: int,
+    date_iso: str,
+    hour: int,
+    *,
+    allowed_hold_id: int | None,
+    close_waitlist: bool,
+    ignore_booking_id: int | None = None,
+) -> BookingResult:
+    hour = int(hour)
+    if hour not in WORKING_HOURS:
+        raise InvalidBooking("Недоступное время")
+    if slot_datetime(date_iso, hour) <= datetime.now(TZ):
+        raise InvalidBooking("Это время уже прошло")
+
+    user = conn.execute(
+        "SELECT tg_id FROM users WHERE id=?",
+        (int(user_id),),
+    ).fetchone()
+    if not user:
+        raise InvalidBooking("Пользователь не найден")
+
+    machine = conn.execute(
+        "SELECT type,name,is_active FROM machines WHERE id=?",
+        (int(machine_id),),
+    ).fetchone()
+    if not machine:
+        raise InvalidBooking("Машина не найдена")
+
+    mtype, mname, active = machine
+    if not active:
+        raise InvalidBooking("Машина сейчас недоступна")
+
+    if not is_admin(int(user[0])):
+        params = [int(user_id), str(date_iso), str(mtype)]
+        sql = """
+            SELECT 1
+            FROM bookings b
+            JOIN machines m ON m.id=b.machine_id
+            WHERE b.user_id=? AND b.date=? AND m.type=?
+        """
+        if ignore_booking_id is not None:
+            sql += " AND b.id<>?"
+            params.append(int(ignore_booking_id))
+        sql += " LIMIT 1"
+        if conn.execute(sql, tuple(params)).fetchone():
+            raise DailyLimit("На этот тип машины уже есть запись в этот день")
+
+    params = [int(machine_id), str(date_iso), hour]
+    sql = "SELECT 1 FROM bookings WHERE machine_id=? AND date=? AND hour=?"
+    if ignore_booking_id is not None:
+        sql += " AND id<>?"
+        params.append(int(ignore_booking_id))
+    sql += " LIMIT 1"
+    if conn.execute(sql, tuple(params)).fetchone():
+        raise SlotBusy("Слот уже занят")
+
+    now_s = datetime.now(TZ).isoformat(timespec="seconds")
+    holds = conn.execute(
+        """
+        SELECT id
+        FROM slot_holds
+        WHERE machine_id=? AND date=? AND hour=?
+          AND status='active' AND expires_at>?
+        """,
+        (int(machine_id), str(date_iso), hour, now_s),
+    ).fetchall()
+    for (hold_id,) in holds:
+        if allowed_hold_id is None or int(hold_id) != int(allowed_hold_id):
+            raise SlotBusy("Слот временно зарезервирован")
+
+    cur = conn.execute(
+        "INSERT INTO bookings(user_id,machine_id,date,hour) VALUES (?,?,?,?)",
+        (int(user_id), int(machine_id), str(date_iso), hour),
+    )
+    booking_id = getattr(cur, "lastrowid", None)
+    if not booking_id:
+        row = conn.execute(
+            """
+            SELECT id FROM bookings
+            WHERE user_id=? AND machine_id=? AND date=? AND hour=?
+            ORDER BY id DESC LIMIT 1
+            """,
+            (int(user_id), int(machine_id), str(date_iso), hour),
+        ).fetchone()
+        booking_id = int(row[0])
+
+    if allowed_hold_id is not None:
+        conn.execute(
+            "UPDATE slot_holds SET status='accepted' WHERE id=?",
+            (int(allowed_hold_id),),
+        )
+
+    if close_waitlist and str(mtype) == "wash":
+        conn.execute(
+            """
+            UPDATE waitlist_requests
+            SET status='matched',matched_booking_id=?,updated_at=?
+            WHERE user_id=? AND status='active'
+            """,
+            (int(booking_id), now_s, int(user_id)),
+        )
+        conn.execute(
+            """
+            UPDATE slot_holds
+            SET status='cancelled'
+            WHERE request_id IN (
+                SELECT id FROM waitlist_requests
+                WHERE user_id=? AND status='matched' AND matched_booking_id=?
+            )
+              AND status='active'
+              AND id<>COALESCE(?, -1)
+            """,
+            (int(user_id), int(booking_id), allowed_hold_id),
+        )
+
+    return BookingResult(
+        int(booking_id),
+        int(user_id),
+        int(machine_id),
+        str(mtype),
+        str(mname),
+        str(date_iso),
+        hour,
+    )
 
 
 async def create_booking_safe(
@@ -71,100 +235,29 @@ async def create_booking_safe(
     allowed_hold_id: int | None = None,
     close_waitlist: bool = True,
 ) -> BookingResult:
-    hour = int(hour)
-    if hour not in WORKING_HOURS:
-        raise InvalidBooking("Недоступное время")
-    if slot_datetime(date_iso, hour) <= datetime.now(TZ):
-        raise InvalidBooking("Это время уже прошло")
-
     async with _BOOKING_LOCK:
-        with get_conn() as conn:
-            machine = conn.execute(
-                "SELECT type,name,is_active FROM machines WHERE id=?",
-                (int(machine_id),),
-            ).fetchone()
-        if not machine:
-            raise InvalidBooking("Машина не найдена")
-
-        mtype, mname, active = machine
-        if not active:
-            raise InvalidBooking("Машина сейчас недоступна")
-
-        with get_conn() as conn:
-            tg_row = conn.execute("SELECT tg_id FROM users WHERE id=?", (int(user_id),)).fetchone()
-        admin_user = bool(tg_row and is_admin(int(tg_row[0])))
-        if not admin_user and get_user_bookings_today(int(user_id), str(date_iso), str(mtype)):
-            raise DailyLimit("На этот тип машины уже есть запись в этот день")
-
-        free = get_free_hours_effective(int(machine_id), str(date_iso))
-        if hour not in free:
-            if allowed_hold_id is None:
-                raise SlotBusy("Слот уже занят или временно зарезервирован")
-            with get_conn() as conn:
-                own = conn.execute(
-                    """
-                    SELECT 1 FROM slot_holds
-                    WHERE id=? AND user_id=? AND machine_id=? AND date=? AND hour=?
-                      AND status='active' AND expires_at>?
-                    """,
-                    (
-                        int(allowed_hold_id),
-                        int(user_id),
-                        int(machine_id),
-                        str(date_iso),
-                        hour,
-                        datetime.now(TZ).isoformat(timespec="seconds"),
-                    ),
-                ).fetchone()
-            if not own:
-                raise SlotBusy("Резерв этого слота уже недействителен")
-
+        conn = get_conn()
+        raw = _begin(conn)
         try:
-            with get_conn() as conn:
-                cur = conn.execute(
-                    "INSERT INTO bookings (user_id,machine_id,date,hour) VALUES (?,?,?,?)",
-                    (int(user_id), int(machine_id), str(date_iso), hour),
-                )
-                booking_id = getattr(cur, "lastrowid", None)
-                if not booking_id:
-                    row = conn.execute(
-                        """
-                        SELECT id FROM bookings
-                        WHERE user_id=? AND machine_id=? AND date=? AND hour=?
-                        ORDER BY id DESC LIMIT 1
-                        """,
-                        (int(user_id), int(machine_id), str(date_iso), hour),
-                    ).fetchone()
-                    booking_id = int(row[0])
-
-                if allowed_hold_id is not None:
-                    conn.execute(
-                        "UPDATE slot_holds SET status='accepted' WHERE id=?",
-                        (int(allowed_hold_id),),
-                    )
-
-                if close_waitlist and str(mtype) == "wash":
-                    now_s = datetime.now(TZ).isoformat(timespec="seconds")
-                    conn.execute(
-                        """
-                        UPDATE waitlist_requests
-                        SET status='matched',matched_booking_id=?,updated_at=?
-                        WHERE user_id=? AND status='active'
-                        """,
-                        (int(booking_id), now_s, int(user_id)),
-                    )
+            result = _insert_booking(
+                conn,
+                int(user_id),
+                int(machine_id),
+                str(date_iso),
+                int(hour),
+                allowed_hold_id=allowed_hold_id,
+                close_waitlist=close_waitlist,
+            )
+            _commit(raw)
+            return result
+        except BookingError:
+            _rollback(raw)
+            raise
         except Exception as exc:
+            _rollback(raw)
             raise SlotBusy("Слот только что заняли") from exc
-
-        return BookingResult(
-            int(booking_id),
-            int(user_id),
-            int(machine_id),
-            str(mtype),
-            str(mname),
-            str(date_iso),
-            hour,
-        )
+        finally:
+            _close_transaction(conn, raw)
 
 
 async def cancel_booking_safe(
@@ -173,16 +266,34 @@ async def cancel_booking_safe(
     require_future: bool = True,
 ) -> BookingResult:
     async with _BOOKING_LOCK:
-        booking = get_booking(int(booking_id))
-        if not booking:
-            raise InvalidBooking("Запись не найдена")
-
-        if require_future and slot_datetime(booking.date, booking.hour) <= datetime.now(TZ):
-            raise InvalidBooking("Начавшуюся запись отменить нельзя")
-
-        with get_conn() as conn:
+        conn = get_conn()
+        raw = _begin(conn)
+        try:
+            row = conn.execute(
+                """
+                SELECT b.id,b.user_id,b.machine_id,m.type,m.name,b.date,b.hour
+                FROM bookings b
+                JOIN machines m ON m.id=b.machine_id
+                WHERE b.id=?
+                """,
+                (int(booking_id),),
+            ).fetchone()
+            if not row:
+                raise InvalidBooking("Запись не найдена")
+            booking = _booking_from_row(row)
+            if require_future and slot_datetime(booking.date, booking.hour) <= datetime.now(TZ):
+                raise InvalidBooking("Начавшуюся запись отменить нельзя")
             conn.execute("DELETE FROM bookings WHERE id=?", (int(booking_id),))
-        return booking
+            _commit(raw)
+            return booking
+        except BookingError:
+            _rollback(raw)
+            raise
+        except Exception:
+            _rollback(raw)
+            raise
+        finally:
+            _close_transaction(conn, raw)
 
 
 async def move_booking_safe(
@@ -193,28 +304,43 @@ async def move_booking_safe(
     *,
     allowed_hold_id: int | None = None,
 ) -> tuple[BookingResult, BookingResult]:
-    old = get_booking(int(current_booking_id))
-    if not old:
-        raise InvalidBooking("Исходная запись не найдена")
-    if slot_datetime(old.date, old.hour) <= datetime.now(TZ):
-        raise InvalidBooking("Начавшуюся запись переносить нельзя")
-
-    new = await create_booking_safe(
-        old.user_id,
-        int(new_machine_id),
-        str(new_date),
-        int(new_hour),
-        allowed_hold_id=allowed_hold_id,
-        close_waitlist=False,
-    )
-    try:
-        with get_conn() as conn:
-            conn.execute("DELETE FROM bookings WHERE id=?", (int(current_booking_id),))
-    except Exception:
+    async with _BOOKING_LOCK:
+        conn = get_conn()
+        raw = _begin(conn)
         try:
-            with get_conn() as conn:
-                conn.execute("DELETE FROM bookings WHERE id=?", (int(new.booking_id),))
-        except Exception:
-            pass
-        raise
-    return old, new
+            row = conn.execute(
+                """
+                SELECT b.id,b.user_id,b.machine_id,m.type,m.name,b.date,b.hour
+                FROM bookings b
+                JOIN machines m ON m.id=b.machine_id
+                WHERE b.id=?
+                """,
+                (int(current_booking_id),),
+            ).fetchone()
+            if not row:
+                raise InvalidBooking("Исходная запись не найдена")
+            old = _booking_from_row(row)
+            if slot_datetime(old.date, old.hour) <= datetime.now(TZ):
+                raise InvalidBooking("Начавшуюся запись переносить нельзя")
+
+            new = _insert_booking(
+                conn,
+                old.user_id,
+                int(new_machine_id),
+                str(new_date),
+                int(new_hour),
+                allowed_hold_id=allowed_hold_id,
+                close_waitlist=False,
+                ignore_booking_id=int(current_booking_id),
+            )
+            conn.execute("DELETE FROM bookings WHERE id=?", (int(current_booking_id),))
+            _commit(raw)
+            return old, new
+        except BookingError:
+            _rollback(raw)
+            raise
+        except Exception as exc:
+            _rollback(raw)
+            raise SlotBusy("Не удалось безопасно перенести запись") from exc
+        finally:
+            _close_transaction(conn, raw)
