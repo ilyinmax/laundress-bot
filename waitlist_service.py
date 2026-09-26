@@ -299,8 +299,6 @@ def _match(requests: list[Request], slots: list[tuple[int, int]]) -> dict[int, t
             if current is None or augment(current, seen):
                 slot_owner[slot] = rid
                 request_slot[rid] = slot
-                if current is not None:
-                    request_slot.pop(current, None)
                 return True
         return False
 
