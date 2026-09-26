@@ -12,7 +12,6 @@ from handlers.laundry_features import (
     router as laundry_features_router,
     attach_feature_bot,
     init_feature_tables,
-    install_feature_hooks,
     rebuild_feature_jobs,
 )
 
@@ -21,7 +20,6 @@ async def main():
     init_db()
     init_feature_tables()
     admin_access.sync_dynamic_admins()
-    install_feature_hooks()
 
     if not get_machines_by_type("wash"):
         for w in WASHING_MACHINES:
