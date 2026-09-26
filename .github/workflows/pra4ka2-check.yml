@@ -1,0 +1,31 @@
+name: PRA4KA 2.0 checks
+
+on:
+  push:
+    branches: [ "pra4ka-2.0" ]
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Compile Python
+        run: python -m compileall -q .
+      - name: Import core modules
+        env:
+          BOT_TOKEN: "123456:TESTTOKEN"
+        run: |
+          python - <<'PY'
+          import database
+          import keyboards
+          import booking_service
+          import waitlist_service
+          import handlers.pra4ka2
+          print("imports ok")
+          PY
