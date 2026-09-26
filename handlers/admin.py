@@ -18,7 +18,7 @@ from database import (
     get_conn, _b64d_try, init_db,
     ensure_user_by_surname_room, get_machine_id_by_name,
     ban_user, unban_user, tg_id_by_username,
-    get_user_bookings_today, get_free_hours, is_admin, get_incomplete_users,
+    get_user_bookings_today, daily_limit_reached, get_free_hours, is_admin, get_incomplete_users,
     set_machine_active, get_all_machines,
 )
 from config import ADMIN_IDS
@@ -518,7 +518,7 @@ async def cmd_abookfio(msg: types.Message):
     machine_type, machine_name = row
 
     # ограничение: 1 запись на тип в сутки
-    if get_user_bookings_today(user_id, date_iso, machine_type):
+    if daily_limit_reached(user_id, date_iso, machine_type):
         t = "стиралку" if machine_type == "wash" else "сушилку"
         return await msg.answer(f"⚠️ У пользователя уже есть запись на {t} в этот день.")
 
