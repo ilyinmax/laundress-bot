@@ -129,9 +129,14 @@ def save_request(
         raise ValueError("Нужно выбрать от 1 до 3 интервалов")
 
     with get_conn() as conn:
-        user = conn.execute("SELECT id FROM users WHERE tg_id=?", (int(tg_id),)).fetchone()
-        if not user:
-            raise ValueError("Пользователь не зарегистрирован")
+        user = conn.execute(
+            "SELECT id,surname,room FROM users WHERE tg_id=?",
+            (int(tg_id),),
+        ).fetchone()
+        if not user or not user[1] or not user[2]:
+            raise ValueError("Сначала завершите регистрацию")
+        if is_banned(int(tg_id)):
+            raise ValueError("Вы заблокированы и не можете использовать лист ожидания")
         user_id = int(user[0])
         old = conn.execute(
             "SELECT id,mode,any_machine,priority_since FROM waitlist_requests WHERE user_id=? AND status='active'",
