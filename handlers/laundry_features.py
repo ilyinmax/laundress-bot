@@ -323,32 +323,6 @@ async def users(cb:types.CallbackQuery):
     try: await cb.message.edit_text("\n\n".join(lines),parse_mode="HTML",reply_markup=users_kb(page,total))
     except TelegramBadRequest: pass
 
-@router.message(F.text=="🧺 Записаться")
-async def book_sync(msg:types.Message):
-    with get_conn() as c: c.execute("UPDATE users SET username=? WHERE tg_id=?",(msg.from_user.username or None,int(msg.from_user.id)))
-    from handlers.booking import choose_date_first
-    await choose_date_first(msg)
-
-ORIG=database.get_user_bookings_today
-INSTALLED=False
-
-def admin_limit(uid,date,typ):
-    with get_conn() as c: r=c.execute("SELECT tg_id FROM users WHERE id=?",(int(uid),)).fetchone()
-    return False if r and is_admin(r[0]) else ORIG(uid,date,typ)
-
-def install_feature_hooks():
-    global INSTALLED
-    if INSTALLED: return
-    from handlers import booking,admin_extra,admin
-    booking.get_user_bookings_today=admin_limit; booking.schedule_reminder=schedule_reminder; admin_extra.get_user_bookings_today=admin_limit
-    if hasattr(admin,"get_user_bookings_today"): admin.get_user_bookings_today=admin_limit
-    if not hasattr(admin_extra,"_lf_original_menu"):
-        admin_extra._lf_original_menu=admin_extra._admin_menu; original=admin_extra._admin_menu
-        def menu():
-            kb=original(); rows=[list(x) for x in kb.inline_keyboard]; rows.insert(max(0,len(rows)-1),[B(text="👥 Пользователи",callback_data="lf_users_0")]); return K(inline_keyboard=rows)
-        admin_extra._admin_menu=menu
-    INSTALLED=True
-
 async def rebuild_feature_jobs(hours=48):
     now,end=datetime.now(TZ),datetime.now(TZ)+timedelta(hours=hours)
     with get_conn() as c:
