@@ -6,7 +6,7 @@ from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
 from config import TIMEZONE, WORKING_HOURS
-from database import DATABASE_URL, get_conn, is_admin
+from database import DATABASE_URL, get_conn, is_admin, is_banned
 
 TZ = ZoneInfo(TIMEZONE)
 _BOOKING_LOCK = asyncio.Lock()
@@ -120,6 +120,8 @@ def _insert_booking(
     ).fetchone()
     if not user:
         raise InvalidBooking("Пользователь не найден")
+    if int(user[0]) > 0 and is_banned(int(user[0])):
+        raise InvalidBooking("Вы заблокированы и не можете записываться")
 
     machine = conn.execute(
         "SELECT type,name,is_active FROM machines WHERE id=?",
