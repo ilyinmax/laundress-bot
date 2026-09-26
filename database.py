@@ -488,6 +488,7 @@ def init_db():
     ensure_ban_tables()
     ensure_reminders_table()
     ensure_machines_active_column()
+    ensure_pra4ka2_tables()
 
 # ---------- бан/антиспам ----------
 def ensure_ban_tables():
@@ -590,7 +591,7 @@ def reset_failed_attempts(tg_id: int):
 # ---------- пользователи ----------
 def bind_stub_user_to_real(tg_id, surname, room):
     with get_conn() as conn:
-        stub = conn.execute("SELECT id FROM users WHERE surname=? AND room=?",
+        stub = conn.execute("SELECT id FROM users WHERE surname=? AND room=? AND tg_id < 0",
                             (_b64e(surname), _b64e(room))).fetchone()
         if not stub: return
         stub_id = stub[0]
