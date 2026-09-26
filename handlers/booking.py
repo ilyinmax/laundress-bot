@@ -9,13 +9,13 @@ from zoneinfo import ZoneInfo
 
 from config import TIMEZONE, WORKING_HOURS
 from keyboards import main_menu
-from scheduler import schedule_reminder
 from booking_service import create_booking_safe, cancel_booking_safe, BookingError, DailyLimit, SlotBusy, InvalidBooking
 from database import (
     is_banned,
     get_conn,
     get_user,
     get_user_bookings_today,
+    daily_limit_reached,
     get_free_hours,
     get_free_hours_effective,
     create_booking,
@@ -32,6 +32,11 @@ except Exception:
 
 
 TZ = ZoneInfo(TIMEZONE)
+
+async def schedule_reminder(tg_id, machine_name, date_str, hour, minutes_before=30):
+    from handlers.laundry_features import schedule_reminder as feature_schedule_reminder
+    return await feature_schedule_reminder(tg_id, machine_name, date_str, hour, minutes_before)
+
 
 
 def now_local() -> datetime:
@@ -584,7 +589,7 @@ async def finalize(callback: types.CallbackQuery):
             return await safe_edit(msg=callback.message, text="Ошибка: машина не найдена.")
         machine_type, machine_name = row
 
-    if get_user_bookings_today(user[0], date_str, machine_type):
+    if daily_limit_reached(user[0], date_str, machine_type):
         type_text = "стиральную машину" if machine_type == "wash" else "сушилку"
         return await safe_edit(
             msg=callback.message,
@@ -660,7 +665,7 @@ async def finalize(callback: types.CallbackQuery):
         next_hour = hour + 1
         if next_hour <= max(WORKING_HOURS):
             # если ещё нет сушки в этот день
-            if not get_user_bookings_today(user[0], date_str, "dry"):
+            if not daily_limit_reached(user[0], date_str, "dry"):
                 with get_conn() as conn:
                     cur = conn.execute(
                         "SELECT id, name FROM machines WHERE type='dry' AND is_active ORDER BY id"
@@ -731,7 +736,7 @@ async def auto_add_dryer(callback: types.CallbackQuery):
         return await safe_edit(callback.message, text="Этот слот не для сушки.")
 
     # уже есть сушка в этот день?
-    if get_user_bookings_today(user[0], date_str, "dry"):
+    if daily_limit_reached(user[0], date_str, "dry"):
         return await safe_edit(
             callback.message,
             text="У вас уже есть запись на сушку в этот день.",
