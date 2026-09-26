@@ -24,6 +24,7 @@ from keyboards import build_main_menu
 
 TZ = ZoneInfo(TIMEZONE)
 BOT: Bot | None = None
+_DISTRIBUTION_LOCK = asyncio.Lock()
 MONTHS = ("", "января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря")
 
 
@@ -433,6 +434,11 @@ async def _create_hold(req: Request, machine_id: int, date_iso: str, hour: int, 
 async def distribute_date(date_iso: str, *, context: str = "day") -> int:
     if not WAITLIST_ENABLED:
         return 0
+    async with _DISTRIBUTION_LOCK:
+        return await _distribute_date_locked(date_iso, context=context)
+
+
+async def _distribute_date_locked(date_iso: str, *, context: str = "day") -> int:
     cutoff_at = None
     if context == "night":
         with get_conn() as conn:
