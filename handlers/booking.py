@@ -18,7 +18,6 @@ from database import (
     daily_limit_reached,
     get_free_hours,
     get_free_hours_effective,
-    create_booking,
     DBUnavailable
 )
 from sqlite3 import IntegrityError  # для SQLite
@@ -606,32 +605,21 @@ async def finalize(callback: types.CallbackQuery):
         )
 
     try:
-        create_booking(user[0], machine_id, date_str, hour)
-    except (IntegrityError, UniqueViolation):
-        # проверим, не ваша ли это запись
-        with get_conn() as conn:
-            mine = conn.execute(
-                """
-                SELECT 1
-                  FROM bookings
-                 WHERE user_id = ?
-                   AND machine_id = ?
-                   AND date =?
-                   AND hour =?
-                """,
-                (user[0], machine_id, date_str, hour),
-            ).fetchone()
-        if mine:
-            return await safe_edit(callback.message, "Вы уже записаны на этот слот.")
+        result = await create_booking_safe(user[0], machine_id, date_str, hour)
+    except DailyLimit:
         return await safe_edit(
             callback.message,
-            text="⚠️ Слот только что заняли. Выберите другое время ⏰",
-            parse_mode="HTML",
+            text="⚠️ У вас уже есть запись на этот тип машины в этот день.",
         )
-    except Exception:
-        # неожиданные ошибки - аккуратно сообщим
+    except (SlotBusy, InvalidBooking):
         return await safe_edit(
-            callback.message, text="Произошла ошибка сервера. Попробуйте ещё раз."
+            callback.message,
+            text="⚠️ Слот уже занят или временно зарезервирован. Выберите другое время ⏰",
+        )
+    except BookingError:
+        return await safe_edit(
+            callback.message,
+            text="Произошла ошибка сервера. Попробуйте ещё раз.",
         )
 
     icon = "🧺" if machine_type == "wash" else "🌬️"
@@ -641,7 +629,7 @@ async def finalize(callback: types.CallbackQuery):
             f"✅ Запись подтверждена!\n\n"
             f"📅 Дата: {date_str}\n"
             f"⏰ Время: {hour:02d}:00\n"
-            f"{icon} {machine_name}\n\n"
+            f"{icon} {result.machine_name}\n\n"
             f"Для отмены используйте /cancel"
         ),
         parse_mode="HTML",
