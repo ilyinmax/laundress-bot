@@ -18,6 +18,7 @@ from database import (
     is_banned,
 )
 from booking_service import create_booking_safe, BookingError
+from keyboards import build_main_menu
 
 TZ = ZoneInfo(TIMEZONE)
 BOT: Bot | None = None
@@ -346,6 +347,7 @@ async def _send_auto_confirmation(req: Request, result, *, night: bool) -> None:
             text,
             parse_mode="HTML",
             disable_notification=_quiet_for(req.user_id),
+            reply_markup=build_main_menu(False),
         )
     except Exception:
         pass
@@ -537,6 +539,7 @@ async def send_pending_notifications() -> int:
             await BOT.send_message(
                 int(tg), str(text), parse_mode="HTML",
                 disable_notification=_quiet_for(int(uid)),
+                reply_markup=build_main_menu(False),
             )
             with get_conn() as conn:
                 conn.execute("UPDATE pending_waitlist_notifications SET sent=1 WHERE id=?", (int(pid),))
