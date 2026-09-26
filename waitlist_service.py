@@ -14,6 +14,7 @@ from database import (
     get_notification_settings,
     usage_penalties_for_users,
     get_free_hours_effective,
+    active_hold_for_user,
     is_banned,
 )
 from booking_service import create_booking_safe, BookingError
