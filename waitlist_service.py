@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import os
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.exceptions import TelegramRetryAfter
 
 from config import TIMEZONE, WORKING_HOURS
 from database import (
@@ -22,6 +24,13 @@ from keyboards import build_main_menu
 
 TZ = ZoneInfo(TIMEZONE)
 BOT: Bot | None = None
+MONTHS = ("", "января", "февраля", "марта", "апреля", "мая", "июня", "июля", "августа", "сентября", "октября", "ноября", "декабря")
+
+
+def pretty_date(date_iso: str) -> str:
+    d = datetime.fromisoformat(str(date_iso)).date()
+    return f"{d.day} {MONTHS[d.month]}"
+
 HOLD_MINUTES = 2
 WAITLIST_ENABLED = os.getenv("WAITLIST_ENABLED", "true").lower() not in {"0", "false", "off", "no"}
 
@@ -318,7 +327,7 @@ async def _send_auto_confirmation(req: Request, result, *, night: bool) -> None:
         return
     text = (
         "✅ <b>Вы записаны</b>\n\n"
-        f"📅 {result.date}\n"
+        f"📅 {pretty_date(result.date)}\n"
         f"🕐 {result.hour:02d}:00\n"
         f"🧺 {result.machine_name}\n\n"
         "Бот нашёл подходящее время через лист ожидания."
@@ -400,7 +409,7 @@ async def _create_hold(req: Request, machine_id: int, date_iso: str, hour: int, 
     ]])
     text = (
         "🔔 <b>Для вас найдено место</b>\n\n"
-        f"📅 {date_iso}\n"
+        f"📅 {pretty_date(date_iso)}\n"
         f"🕐 {hour:02d}:00\n"
         f"🧺 {machine[0]}\n\n"
         f"Слот зарезервирован за вами на {HOLD_MINUTES} минуты."
@@ -410,6 +419,7 @@ async def _create_hold(req: Request, machine_id: int, date_iso: str, hour: int, 
             req.tg_id, text, parse_mode="HTML", reply_markup=kb,
             disable_notification=_quiet_for(req.user_id),
         )
+        await asyncio.sleep(0.04)
     except Exception:
         with get_conn() as conn:
             conn.execute("UPDATE slot_holds SET status='expired' WHERE id=?", (hold_id,))
@@ -547,17 +557,42 @@ async def send_pending_notifications() -> int:
         ).fetchall()
     sent = 0
     for pid, uid, tg, text in rows:
+        with get_conn() as conn:
+            booking_row = conn.execute(
+                "SELECT booking_id FROM pending_waitlist_notifications WHERE id=?",
+                (int(pid),),
+            ).fetchone()
+            booking_id = int(booking_row[0]) if booking_row and booking_row[0] else None
+            exists = (
+                conn.execute("SELECT 1 FROM bookings WHERE id=?", (booking_id,)).fetchone()
+                if booking_id else None
+            )
+        if booking_id and not exists:
+            with get_conn() as conn:
+                conn.execute("UPDATE pending_waitlist_notifications SET sent=1 WHERE id=?", (int(pid),))
+            continue
         try:
             await BOT.send_message(
                 int(tg), str(text), parse_mode="HTML",
                 disable_notification=_quiet_for(int(uid)),
                 reply_markup=build_main_menu(False),
             )
-            with get_conn() as conn:
-                conn.execute("UPDATE pending_waitlist_notifications SET sent=1 WHERE id=?", (int(pid),))
-            sent += 1
+        except TelegramRetryAfter as exc:
+            await asyncio.sleep(float(exc.retry_after) + 0.2)
+            try:
+                await BOT.send_message(
+                    int(tg), str(text), parse_mode="HTML",
+                    disable_notification=_quiet_for(int(uid)),
+                    reply_markup=build_main_menu(False),
+                )
+            except Exception:
+                continue
         except Exception:
-            pass
+            continue
+        with get_conn() as conn:
+            conn.execute("UPDATE pending_waitlist_notifications SET sent=1 WHERE id=?", (int(pid),))
+        sent += 1
+        await asyncio.sleep(0.04)
     return sent
 
 
@@ -604,9 +639,11 @@ async def accept_hold(hold_id: int, tg_id: int):
     row = get_hold(hold_id)
     if not row or int(row[3]) != int(tg_id) or str(row[11]) != "active":
         return None
-    if _dt(row[8]) <= datetime.now(TZ):
+    if is_banned(int(tg_id)):
         with get_conn() as conn:
-            conn.execute("UPDATE slot_holds SET status='expired' WHERE id=?", (int(hold_id),))
+            conn.execute("UPDATE slot_holds SET status='cancelled' WHERE id=?", (int(hold_id),))
+        return None
+    if _dt(row[8]) <= datetime.now(TZ):
         return None
 
     from booking_service import move_booking_safe
@@ -779,8 +816,8 @@ async def _create_move_hold(
     ]])
     text = (
         "🔄 <b>Можно перенести стирку раньше</b>\n\n"
-        f"Сейчас: {current[1]}, {int(current[2]):02d}:00, {current[0]}\n"
-        f"Освободилось: {date_iso}, {int(hour):02d}:00, {machine[0]}\n\n"
+        f"Сейчас: {pretty_date(str(current[1]))}, {int(current[2]):02d}:00, {current[0]}\n"
+        f"Освободилось: {pretty_date(date_iso)}, {int(hour):02d}:00, {machine[0]}\n\n"
         f"Новый слот удерживается {HOLD_MINUTES} минуты."
     )
     try:
