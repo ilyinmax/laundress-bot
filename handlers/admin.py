@@ -16,7 +16,7 @@ from aiogram.exceptions import TelegramRetryAfter
 
 from database import (
     get_conn, _b64d_try, init_db,
-    ensure_user_by_surname_room, get_machine_id_by_name, create_booking,
+    ensure_user_by_surname_room, get_machine_id_by_name,
     ban_user, unban_user, tg_id_by_username,
     get_user_bookings_today, get_free_hours, is_admin, get_incomplete_users,
     set_machine_active, get_all_machines,
@@ -27,6 +27,7 @@ from zoneinfo import ZoneInfo
 from config import TIMEZONE
 from aiogram.types import FSInputFile  # для экспорта
 from scheduler import schedule_test_message
+from booking_service import create_booking_safe, cancel_booking_safe, BookingError
 
 TZ = ZoneInfo(TIMEZONE)
 
@@ -63,13 +64,13 @@ async def _render_schedule(message: types.Message, date: str):
             who = f"@{username}"
         else:
             who = f"id:{tg_id}"
-        room_txt = room or "—"
+        room_txt = room or "-"
 
         if machine != current_machine:
             text += f"\n<b>{machine}</b>\n"
             current_machine = machine
 
-        text += f"  ⏰ {hour:02d}:00 — {who} (комн. {room_txt})\n"
+        text += f"  ⏰ {hour:02d}:00 - {who} (комн. {room_txt})\n"
         buttons.append([
             InlineKeyboardButton(text=f"❌ Удалить {hour:02d}:00 ({who})",
                                  callback_data=f"admin_del_{booking_id}_{date}"),
@@ -82,7 +83,7 @@ async def _render_schedule(message: types.Message, date: str):
 
 
 # === Импорт из Excel ===
-def import_bookings_from_xlsx(path: str) -> tuple[int, int, list[str]]:
+async def import_bookings_from_xlsx(path: str) -> tuple[int, int, list[str]]:
     df = pd.read_excel(path)
     df["date_iso"] = pd.to_datetime(df["Дата"]).dt.date.astype(str)
     df["hour"] = pd.to_datetime(df["Час"].astype(str)).dt.hour
@@ -106,9 +107,14 @@ def import_bookings_from_xlsx(path: str) -> tuple[int, int, list[str]]:
                 continue
 
             try:
-                create_booking(uid, mid, date_iso, hour)
+                result = await create_booking_safe(uid, mid, date_iso, hour)
                 inserted += 1
-            except Exception:
+                with get_conn() as conn:
+                    tg_row = conn.execute("SELECT tg_id FROM users WHERE id=?", (uid,)).fetchone()
+                if tg_row and int(tg_row[0]) > 0:
+                    from handlers.laundry_features import schedule_reminder
+                    await schedule_reminder(int(tg_row[0]), result.machine_name, result.date, result.hour, 30)
+            except BookingError:
                 skipped += 1
         except Exception as e:
             skipped += 1
@@ -134,7 +140,7 @@ async def handle_xlsx(msg: types.Message, bot: Bot):
     await bot.download_file(f.file_path, path)
 
     init_db()
-    added, skipped, errors = import_bookings_from_xlsx(path)
+    added, skipped, errors = await import_bookings_from_xlsx(path)
 
     text = f"✅ Импорт завершён.\nДобавлено: {added}\nПропущено: {skipped}"
     if errors:
@@ -212,7 +218,7 @@ async def show_stats(callback: types.CallbackQuery):
         """, (today.isoformat(), week_end.isoformat())).fetchall()
 
     text = (
-        f"📊 <b>Статистика на неделю ({today.strftime('%d.%m')} – {week_end.strftime('%d.%m')})</b>\n\n"
+        f"📊 <b>Статистика на неделю ({today.strftime('%d.%m')} - {week_end.strftime('%d.%m')})</b>\n\n"
         f"Всего записей: <b>{total}</b>\n\n"
     )
     for t, count in by_type:
@@ -253,9 +259,13 @@ async def delete_booking(callback: types.CallbackQuery):
     except ValueError:
         return await callback.answer("Неверный ID записи.", show_alert=True)
 
-    with get_conn() as conn:
-        conn.execute("DELETE FROM bookings WHERE id=?", (booking_id,))
+    try:
+        old = await cancel_booking_safe(booking_id, require_future=False)
+    except Exception:
+        return await callback.answer("Запись уже удалена.", show_alert=True)
 
+    from waitlist_service import distribute_date
+    await distribute_date(old.date, context="day")
     await _render_schedule(callback.message, date)
 
 
@@ -323,7 +333,7 @@ async def export_bookings(event: types.Message | types.CallbackQuery):
         width = max(len(str(c.value)) if c.value else 0 for c in col) + 2
         ws.column_dimensions[col[0].column_letter].width = width
 
-    # вместо локального имени — безопаснее в /tmp
+    # вместо локального имени - безопаснее в /tmp
     fname = f"/tmp/bookings_{datetime.now(TZ).strftime('%Y-%m-%d_%H-%M-%S')}.xlsx"
     wb.save(fname)
     await msg.answer_document(FSInputFile(fname), caption="📊 Экспорт всех записей")
@@ -351,9 +361,9 @@ async def list_banned(msg: types.Message):
     buttons = []
     for tg_id, reason, until, _ in rows:
         mention = f"<a href='tg://user?id={tg_id}'>{tg_id}</a>"
-        reason = reason or "—"
-        until  = until  or "—"
-        text_lines.append(f"• {mention} — до {until}\n  Причина: {reason}")
+        reason = reason or "-"
+        until  = until  or "-"
+        text_lines.append(f"• {mention} - до {until}\n  Причина: {reason}")
         buttons.append([InlineKeyboardButton(text=f"Разбанить {tg_id}",
                                              callback_data=f"unban_{tg_id}")])
 
@@ -389,9 +399,9 @@ async def cb_unban(callback: types.CallbackQuery):
     buttons = []
     for tg_id2, reason, until, _ in rows:
         mention = f"<a href='tg://user?id={tg_id2}'>{tg_id2}</a>"
-        reason = reason or "—"
-        until  = until  or "—"
-        text_lines.append(f"• {mention} — до {until}\n  Причина: {reason}")
+        reason = reason or "-"
+        until  = until  or "-"
+        text_lines.append(f"• {mention} - до {until}\n  Причина: {reason}")
         buttons.append([InlineKeyboardButton(text=f"Разбанить {tg_id2}",
                                              callback_data=f"unban_{tg_id2}")])
 
@@ -427,7 +437,7 @@ async def cmd_ban(msg: types.Message):
     days = 7
     reason = "Бан по команде /ban"
 
-    # 1) Если это reply — берём пользователя из ответа
+    # 1) Если это reply - берём пользователя из ответа
     if msg.reply_to_message:
         target_id = msg.reply_to_message.from_user.id
         if args:
@@ -495,7 +505,7 @@ async def cmd_abookfio(msg: types.Message):
         from datetime import datetime
         datetime.fromisoformat(date_iso)
     except Exception:
-        return await msg.answer("Проверьте аргументы: machine_id — число, час 0–23, дата — YYYY-MM-DD.")
+        return await msg.answer("Проверьте аргументы: machine_id - число, час 0-23, дата - YYYY-MM-DD.")
 
     # найдём/создадим пользователя по Фамилии и Комнате (вернётся users.id)
     user_id = ensure_user_by_surname_room(surname, room)
@@ -517,8 +527,17 @@ async def cmd_abookfio(msg: types.Message):
     if hour not in free:
         return await msg.answer("Этот час уже занят. Выберите другой.")
 
-    # создаём запись
-    create_booking(user_id, machine_id, date_iso, hour)
+    # создаём запись через общий сервис
+    try:
+        result = await create_booking_safe(user_id, machine_id, date_iso, hour)
+    except BookingError:
+        return await msg.answer("Не удалось создать запись. Возможно, слот уже занят.")
+
+    with get_conn() as conn:
+        tg_row = conn.execute("SELECT tg_id FROM users WHERE id=?", (user_id,)).fetchone()
+    if tg_row and int(tg_row[0]) > 0:
+        from handlers.laundry_features import schedule_reminder
+        await schedule_reminder(int(tg_row[0]), result.machine_name, result.date, result.hour, 30)
 
     # ответ админу
     text = (f"✅ Запись создана:\n"
@@ -542,7 +561,7 @@ def _machines_admin_view():
     for mid, t, name, is_active in rows:
         kind = "стиралка" if t == "wash" else "сушилка"
         status = "🟢 работает" if is_active else "🔴 выключена"
-        lines.append(f"#{mid} — {name} ({kind}), {status}")
+        lines.append(f"#{mid} - {name} ({kind}), {status}")
 
         toggle_text = "⛔️ Выключить" if is_active else "✅ Включить"
         kb_rows.append([
@@ -574,7 +593,7 @@ async def admin_toggle_machine(callback: types.CallbackQuery):
     try:
         _, _, mid_str, active_str = callback.data.split("_", 3)
         mid = int(mid_str)
-        new_active = bool(int(active_str))   # 1 → включить, 0 → выключить
+        new_active = bool(int(active_str))   # 1 -> включить, 0 -> выключить
     except Exception:
         return await callback.answer("Некорректные данные кнопки.", show_alert=True)
 
@@ -665,7 +684,7 @@ async def cmd_laundry_news(message: types.Message):
         ).fetchall()]
 
     def _short(names):
-        # превращаем 'Стиральная №3' → '№3', 'Сушилка №2' → '№2'
+        # превращаем 'Стиральная №3' -> '№3', 'Сушилка №2' -> '№2'
         result = []
         for n in names:
             if "№" in n:
@@ -677,8 +696,8 @@ async def cmd_laundry_news(message: types.Message):
     text = (
       #  "Отличные новости по прачечной 🎉\n"
         "Рабочие машины:\n"
-        f"🧺 стиралки – {_short(wash)}\n"
-        f"🌬 сушилки – {_short(dry)}\n"
+        f"🧺 стиралки - {_short(wash)}\n"
+        f"🌬 сушилки - {_short(dry)}\n"
       #  "Пользуемся и бережём машинки 🙏"
     )
 
@@ -697,7 +716,7 @@ async def cmd_laundry_news(message: types.Message):
             sent += 1
             await asyncio.sleep(0.05)        # лёгкий троттлинг
         except TelegramRetryAfter as e:
-            # если телега попросила подождать — ждём и пробуем ещё раз
+            # если телега попросила подождать - ждём и пробуем ещё раз
             await asyncio.sleep(e.retry_after + 1)
             try:
                 await message.bot.send_message(
