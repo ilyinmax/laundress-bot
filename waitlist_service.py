@@ -427,6 +427,18 @@ async def distribute_date(date_iso: str, *, context: str = "day") -> int:
             ).fetchone()
         cutoff_at = str(round_row[0]) if round_row else None
     requests = _active_requests(cutoff_at)
+    recent_cutoff = (datetime.now(TZ) - timedelta(minutes=10)).isoformat(timespec="seconds")
+    with get_conn() as conn:
+        recent_rows = conn.execute(
+            """
+            SELECT DISTINCT request_id
+            FROM waitlist_offer_history
+            WHERE date=? AND result IN ('declined','expired') AND created_at>=?
+            """,
+            (str(date_iso), recent_cutoff),
+        ).fetchall()
+    recent_requests = {int(r[0]) for r in recent_rows if r[0] is not None}
+    requests = [r for r in requests if r.id not in recent_requests]
     slots = _free_slots(date_iso)
     if not requests or not slots:
         return 0
@@ -664,9 +676,22 @@ async def offer_earlier_for_date(date_iso: str) -> int:
     for rid, mid in machine_rows:
         machines.setdefault(int(rid), set()).add(int(mid))
 
+    recent_cutoff = (datetime.now(TZ) - timedelta(minutes=10)).isoformat(timespec="seconds")
+    with get_conn() as conn:
+        recent_rows = conn.execute(
+            """
+            SELECT DISTINCT request_id FROM waitlist_offer_history
+            WHERE date=? AND result IN ('declined','expired') AND created_at>=?
+            """,
+            (str(date_iso), recent_cutoff),
+        ).fetchall()
+    recent_requests = {int(r[0]) for r in recent_rows if r[0] is not None}
+
     candidates = []
     for rid, uid, tg, any_machine, priority_since, booking_id, current_date in rows:
         if int(tg) <= 0 or is_banned(int(tg)):
+            continue
+        if int(rid) in recent_requests:
             continue
         if active_hold_for_user(int(uid)):
             continue
