@@ -4,8 +4,9 @@ from aiogram import Bot, Dispatcher
 from config import BOT_TOKEN, WASHING_MACHINES, DRYERS
 from database import init_db, add_machine, get_machines_by_type
 from scheduler import setup_scheduler, attach_bot
+from waitlist_service import attach_bot as attach_waitlist_bot, process_night_round
 
-from handlers import registration, booking, admin_access, admin_extra, admin
+from handlers import registration, booking, admin_access, admin_extra, admin, pra4ka2
 from handlers.bot_commands import setup_bot_commands
 from handlers.laundry_features import (
     router as laundry_features_router,
@@ -33,6 +34,7 @@ async def main():
     dp = Dispatcher()
 
     dp.include_router(registration.router)
+    dp.include_router(pra4ka2.router)
     dp.include_router(laundry_features_router)
     dp.include_router(booking.router)
     dp.include_router(admin_access.router)
@@ -48,7 +50,12 @@ async def main():
     setup_scheduler()
     attach_bot(bot)
     attach_feature_bot(bot)
+    attach_waitlist_bot(bot)
     await rebuild_feature_jobs(hours=48)
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    if datetime.now(ZoneInfo('Europe/Moscow')).hour == 23:
+        await process_night_round()
 
     print("Бот запущен 🚀")
     try:
