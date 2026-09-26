@@ -16,6 +16,7 @@ from database import (
     get_conn,
     get_free_hours,
     get_user_bookings_today,
+    daily_limit_reached,
     is_admin,
 )
 from zoneinfo import ZoneInfo
@@ -52,6 +53,7 @@ def _admin_menu() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📅 Расписание", callback_data="admin_menu_schedule"),
             InlineKeyboardButton(text="📊 Статистика", callback_data="admin_menu_stats"),
         ],
+        [InlineKeyboardButton(text="👥 Пользователи", callback_data="lf_users_0")],
         [InlineKeyboardButton(text="📤 Экспорт", callback_data="admin_menu_export")],
     ])
 
@@ -353,7 +355,7 @@ async def early_choose_day(callback: types.CallbackQuery, state: FSMContext):
 
     rows: list[list[InlineKeyboardButton]] = []
     for machine_id, machine_type, machine_name in machines:
-        if get_user_bookings_today(int(user_id), date_iso, machine_type):
+        if daily_limit_reached(int(user_id), date_iso, machine_type):
             continue
         free = get_free_hours(int(machine_id), date_iso)
         if selected == today:
@@ -419,7 +421,7 @@ async def early_choose_machine(callback: types.CallbackQuery, state: FSMContext)
     user_id = data.get("target_user_id")
     if not user_id:
         return await callback.message.edit_text("Сессия устарела. Откройте /early заново.")
-    if get_user_bookings_today(int(user_id), date_iso, machine_type):
+    if daily_limit_reached(int(user_id), date_iso, machine_type):
         return await callback.answer("У пользователя уже есть запись на этот тип машины в этот день.", show_alert=True)
 
     free = get_free_hours(machine_id, date_iso)
@@ -516,7 +518,7 @@ async def early_confirm(callback: types.CallbackQuery, state: FSMContext):
         await state.clear()
         return await callback.message.edit_text("Сессия устарела. Откройте /early заново.")
 
-    if get_user_bookings_today(user_id, date_iso, machine_type):
+    if daily_limit_reached(user_id, date_iso, machine_type):
         return await callback.answer("У пользователя уже есть запись на этот тип машины в этот день.", show_alert=True)
     if hour not in get_free_hours(machine_id, date_iso):
         return await callback.answer("Этот слот только что заняли. Выберите другое время.", show_alert=True)
