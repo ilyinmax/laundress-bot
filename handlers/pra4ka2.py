@@ -24,6 +24,7 @@ from waitlist_service import (
     save_request,
     accept_hold,
     decline_hold,
+    get_hold,
 )
 
 TZ = ZoneInfo(TIMEZONE)
@@ -771,6 +772,8 @@ async def waitlist_decline_callback(callback: types.CallbackQuery):
         hold_id = int(callback.data.removeprefix("wl_decline_"))
     except Exception:
         return await callback.answer("Некорректное предложение.", show_alert=True)
+    hold = get_hold(hold_id)
+    context = str(hold[9]) if hold else ""
     ok = await decline_hold(hold_id, callback.from_user.id)
     if not ok:
         return await callback.answer("Предложение уже неактуально.", show_alert=True)
@@ -779,7 +782,10 @@ async def waitlist_decline_callback(callback: types.CallbackQuery):
         await callback.message.edit_reply_markup(reply_markup=None)
     except Exception:
         pass
-    await callback.message.answer("Слот пропущен. Ваша заявка остаётся активной.")
+    if context == "move":
+        await callback.message.answer("Текущая запись сохранена без изменений.")
+    else:
+        await callback.message.answer("Слот пропущен. Ваша заявка остаётся активной.")
 
 
 @router.message(F.text.startswith("🕐 Тихие часы:"))
