@@ -60,13 +60,8 @@ from handlers.laundry_features import (  # noqa: E402
     router as laundry_features_router,
     attach_feature_bot,
     init_feature_tables,
-    install_feature_hooks,
     rebuild_feature_jobs,
 )
-
-# Подменяем только нужные точки старой логики: дневной лимит админов,
-# постановку новых карточек-напоминаний и кнопку пользователей в /admin.
-install_feature_hooks()
 
 # laundry_features идёт раньше booking_router, чтобы именно на кнопке
 # «🧺 Записаться» обновлять username, а затем запускать старый сценарий записи.
