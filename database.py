@@ -52,7 +52,7 @@ def _stub_tg_id(surname: str, room: str) -> int:
     return -max(1, val % 10**11)  # отрицательный, но уникальный
 
 def ensure_user_by_surname_room(surname: str, room: str) -> int:
-    """Возвращает id пользователя. Если его нет — создаёт 'стаб' с фиктивным tg_id."""
+    """Возвращает id пользователя. Если его нет - создаёт 'стаб' с фиктивным tg_id."""
     with get_conn() as conn:
         row = conn.execute(
             "SELECT id FROM users WHERE surname=? AND room=?",
@@ -75,8 +75,8 @@ def get_machine_id_by_name(name: str) -> int | None:
 def set_machine_active(machine_id: int, active: bool) -> None:
     """
     Включить/выключить машину.
-    active=True  → машина доступна в /book
-    active=False → скрыта из записи, но старые записи и напоминания живут.
+    active=True  -> машина доступна в /book
+    active=False -> скрыта из записи, но старые записи и напоминания живут.
     """
     with get_conn() as conn:
         conn.execute(
@@ -99,7 +99,7 @@ def get_all_machines():
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
 
 def _rewrite_qmarks(sql: str) -> str:
-    # SQLite использует '?', Postgres — %s
+    # SQLite использует '?', Postgres - %s
     return sql.replace("?", "%s")
 
 def _rewrite_insert_or_ignore(sql: str) -> str:
@@ -204,7 +204,7 @@ if DATABASE_URL:
                     # пытаемся аккуратно вернуть коннект в пул и закрыть его
                     _pg_pool.putconn(self._conn, close=True)
             except Exception:
-                # если пул уже в неадеквате — просто закрываем
+                # если пул уже в неадеквате - просто закрываем
                 try:
                     self._conn.close()
                 except Exception:
@@ -218,7 +218,7 @@ if DATABASE_URL:
             sql = _rewrite_insert_or_ignore(sql)
             sql = _rewrite_qmarks(sql)
 
-            # если коннект уже помечен как закрытый — пересоздаём заранее
+            # если коннект уже помечен как закрытый - пересоздаём заранее
             if getattr(self._conn, "closed", 0):
                 self._reset_conn()
 
@@ -227,7 +227,7 @@ if DATABASE_URL:
                 cur.execute(sql, params)
             except psycopg2.OperationalError:
                 # соединение умерло (например, "SSL connection has been closed unexpectedly")
-                # → пересоздаём и пробуем ещё раз
+                # -> пересоздаём и пробуем ещё раз
                 self._reset_conn()
                 cur = self._conn.cursor()
                 cur.execute(sql, params)
@@ -249,11 +249,11 @@ if DATABASE_URL:
                     pass
             self._opened.clear()
 
-            # возвращаем коннект в пул (без close=True — он живой и пригодится)
+            # возвращаем коннект в пул (без close=True - он живой и пригодится)
             try:
                 _pg_pool.putconn(self._conn)
             except Exception:
-                # если что-то пошло не так — просто закрываем
+                # если что-то пошло не так - просто закрываем
                 try:
                     self._conn.close()
                 except Exception:
@@ -307,7 +307,7 @@ if DATABASE_URL:
                 cur = self._conn.cursor()
                 cur.execute(sql, params)
             except OperationalError as e:
-                # Neon/сеть могло прибить коннект — пересоздаём и повторяем 1 раз
+                # Neon/сеть могло прибить коннект - пересоздаём и повторяем 1 раз
                 self._reset_conn()
                 cur = self._conn.cursor()
                 cur.execute(sql, params)
@@ -366,7 +366,7 @@ def ensure_reminders_table():
     пересоздана (данные о прошлых напоминаниях нам не критичны).
     """
     with get_conn() as conn:
-        # На случай старой схемы — пересоздаём таблицу.
+        # На случай старой схемы - пересоздаём таблицу.
         #conn.execute("DROP TABLE IF EXISTS reminders_sent")
 
         if DATABASE_URL:
@@ -714,10 +714,22 @@ def create_booking(user_id, machine_id, date_iso, hour):
         """, (user_id, machine_id, date_iso, hour))
 
 def cleanup_old_bookings():
+    """Keep bookings for 7 days, usage history for 30 days."""
+    record_usage_history()
     today = datetime.now(TZ).date()
-    cutoff = today - timedelta(days=1)
+    bookings_cutoff = today - timedelta(days=7)
+    usage_cutoff = datetime.now(TZ) - timedelta(days=30)
+    offers_cutoff = datetime.now(TZ) - timedelta(days=30)
     with get_conn() as conn:
-        conn.execute("DELETE FROM bookings WHERE date < ?", (cutoff.isoformat(),))
+        conn.execute("DELETE FROM bookings WHERE date < ?", (bookings_cutoff.isoformat(),))
+        conn.execute(
+            "DELETE FROM laundry_usage_history WHERE occurred_at < ?",
+            (usage_cutoff.isoformat(timespec="seconds"),),
+        )
+        conn.execute(
+            "DELETE FROM waitlist_offer_history WHERE created_at < ?",
+            (offers_cutoff.isoformat(timespec="seconds"),),
+        )
 
 def was_reminder_sent(
     tg_id: int, machine_id: int, date_iso: str, hour: int, minutes_before: int
@@ -748,3 +760,331 @@ def mark_reminder_sent(
             VALUES (?, ?, ?, ?, ?)
             ON CONFLICT(tg_id, machine_id, date, hour, minutes_before) DO NOTHING
         """, (tg_id, machine_id, date_iso, hour, minutes_before))
+
+
+# =========================================================
+# PRA4KA 2.0
+# =========================================================
+
+def ensure_pra4ka2_tables():
+    """
+    Additive schema only. Old bot versions can keep using users/machines/bookings.
+    """
+    statements = [
+        """
+        CREATE TABLE IF NOT EXISTS waitlist_requests (
+            id INTEGER PRIMARY KEY,
+            user_id INTEGER NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+            mode TEXT NOT NULL DEFAULT 'notify',
+            status TEXT NOT NULL DEFAULT 'active',
+            any_machine INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT NOT NULL,
+            priority_since TEXT NOT NULL,
+            matched_booking_id INTEGER,
+            updated_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS waitlist_intervals (
+            id INTEGER PRIMARY KEY,
+            request_id INTEGER NOT NULL REFERENCES waitlist_requests(id) ON DELETE CASCADE,
+            start_hour INTEGER NOT NULL,
+            end_hour INTEGER NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS waitlist_machines (
+            request_id INTEGER NOT NULL REFERENCES waitlist_requests(id) ON DELETE CASCADE,
+            machine_id INTEGER NOT NULL REFERENCES machines(id) ON DELETE CASCADE,
+            PRIMARY KEY (request_id, machine_id)
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS notification_settings (
+            user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+            quiet_enabled INTEGER NOT NULL DEFAULT 0,
+            quiet_start INTEGER NOT NULL DEFAULT 23,
+            quiet_end INTEGER NOT NULL DEFAULT 8,
+            earlier_offer_enabled INTEGER NOT NULL DEFAULT 1,
+            reminder_30_enabled INTEGER NOT NULL DEFAULT 1
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS slot_holds (
+            id INTEGER PRIMARY KEY,
+            request_id INTEGER REFERENCES waitlist_requests(id) ON DELETE SET NULL,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            machine_id INTEGER NOT NULL REFERENCES machines(id) ON DELETE CASCADE,
+            date TEXT NOT NULL,
+            hour INTEGER NOT NULL,
+            expires_at TEXT NOT NULL,
+            context TEXT NOT NULL DEFAULT 'day',
+            status TEXT NOT NULL DEFAULT 'active',
+            current_booking_id INTEGER,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS waitlist_offer_history (
+            id INTEGER PRIMARY KEY,
+            request_id INTEGER REFERENCES waitlist_requests(id) ON DELETE CASCADE,
+            machine_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            hour INTEGER NOT NULL,
+            result TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS waitlist_rounds (
+            target_date TEXT PRIMARY KEY,
+            cutoff_at TEXT NOT NULL,
+            started_at TEXT,
+            finished_at TEXT,
+            status TEXT NOT NULL DEFAULT 'pending'
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS laundry_usage_history (
+            id INTEGER PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            booking_id INTEGER UNIQUE,
+            occurred_at TEXT NOT NULL
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS pending_waitlist_notifications (
+            id INTEGER PRIMARY KEY,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            booking_id INTEGER,
+            text TEXT NOT NULL,
+            send_at TEXT NOT NULL,
+            sent INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_waitlist_status ON waitlist_requests(status, priority_since)",
+        "CREATE INDEX IF NOT EXISTS idx_waitlist_intervals_req ON waitlist_intervals(request_id)",
+        "CREATE INDEX IF NOT EXISTS idx_holds_slot ON slot_holds(machine_id, date, hour, status)",
+        "CREATE INDEX IF NOT EXISTS idx_holds_user ON slot_holds(user_id, status)",
+        "CREATE INDEX IF NOT EXISTS idx_usage_user_time ON laundry_usage_history(user_id, occurred_at)",
+        "CREATE INDEX IF NOT EXISTS idx_pending_notice ON pending_waitlist_notifications(sent, send_at)",
+    ]
+    with get_conn() as conn:
+        for stmt in statements:
+            try:
+                conn.execute(stmt)
+            except Exception:
+                # PostgreSQL SERIAL is not required here because all inserts use explicit
+                # auto-generated ids only where the backend supports it. Migrations below
+                # repair the id columns for PostgreSQL installations created from scratch.
+                raise
+
+    if DATABASE_URL:
+        # INTEGER PRIMARY KEY does not auto-increment in PostgreSQL. Convert the new id
+        # columns to identity-like sequences only when they do not already have defaults.
+        with get_conn() as conn:
+            for table in (
+                "waitlist_requests",
+                "waitlist_intervals",
+                "slot_holds",
+                "waitlist_offer_history",
+                "laundry_usage_history",
+                "pending_waitlist_notifications",
+            ):
+                seq = f"{table}_id_seq"
+                try:
+                    conn.execute(f"CREATE SEQUENCE IF NOT EXISTS {seq}")
+                    conn.execute(
+                        f"ALTER TABLE {table} ALTER COLUMN id SET DEFAULT nextval('{seq}')"
+                    )
+                    conn.execute(
+                        f"SELECT setval('{seq}', GREATEST(COALESCE((SELECT MAX(id) FROM {table}), 0), 1), "
+                        f"COALESCE((SELECT MAX(id) FROM {table}), 0) > 0)"
+                    )
+                except Exception:
+                    pass
+
+
+def get_notification_settings(user_id: int) -> dict:
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT quiet_enabled, quiet_start, quiet_end,
+                   earlier_offer_enabled, reminder_30_enabled
+            FROM notification_settings
+            WHERE user_id=?
+            """,
+            (int(user_id),),
+        ).fetchone()
+        if not row:
+            conn.execute(
+                "INSERT INTO notification_settings (user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING",
+                (int(user_id),),
+            )
+            row = (0, 23, 8, 1, 1)
+    return {
+        "quiet_enabled": bool(row[0]),
+        "quiet_start": int(row[1]),
+        "quiet_end": int(row[2]),
+        "earlier_offer_enabled": bool(row[3]),
+        "reminder_30_enabled": bool(row[4]),
+    }
+
+
+def set_notification_setting(user_id: int, field: str, value) -> None:
+    allowed = {
+        "quiet_enabled",
+        "quiet_start",
+        "quiet_end",
+        "earlier_offer_enabled",
+        "reminder_30_enabled",
+    }
+    if field not in allowed:
+        raise ValueError("Unknown notification setting")
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO notification_settings (user_id) VALUES (?) ON CONFLICT(user_id) DO NOTHING",
+            (int(user_id),),
+        )
+        conn.execute(
+            f"UPDATE notification_settings SET {field}=? WHERE user_id=?",
+            (value, int(user_id)),
+        )
+
+
+def active_hold_for_user(user_id: int):
+    now = datetime.now(TZ).isoformat(timespec="seconds")
+    with get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT id, request_id, machine_id, date, hour, expires_at, context, current_booking_id
+            FROM slot_holds
+            WHERE user_id=? AND status='active' AND expires_at>?
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (int(user_id), now),
+        ).fetchone()
+
+
+def slot_has_active_hold(machine_id: int, date_iso: str, hour: int) -> bool:
+    now = datetime.now(TZ).isoformat(timespec="seconds")
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT 1 FROM slot_holds
+            WHERE machine_id=? AND date=? AND hour=?
+              AND status='active' AND expires_at>?
+            LIMIT 1
+            """,
+            (int(machine_id), str(date_iso), int(hour), now),
+        ).fetchone()
+    return bool(row)
+
+
+def get_free_hours_effective(machine_id: int, date_iso: str) -> list[int]:
+    with get_conn() as conn:
+        busy = {
+            int(r[0])
+            for r in conn.execute(
+                "SELECT hour FROM bookings WHERE machine_id=? AND date=?",
+                (int(machine_id), str(date_iso)),
+            ).fetchall()
+        }
+        now_s = datetime.now(TZ).isoformat(timespec="seconds")
+        held = {
+            int(r[0])
+            for r in conn.execute(
+                """
+                SELECT hour FROM slot_holds
+                WHERE machine_id=? AND date=? AND status='active' AND expires_at>?
+                """,
+                (int(machine_id), str(date_iso), now_s),
+            ).fetchall()
+        }
+    return [h for h in WORKING_HOURS if h not in busy and h not in held]
+
+
+def record_usage_history(now: datetime | None = None) -> int:
+    """
+    Record a wash once its booked start time has arrived.
+    Cancellation handlers reject already-started slots, so reaching the slot
+    is the objective signal used by the fairness system.
+    """
+    now = now or datetime.now(TZ)
+    oldest = (now.date() - timedelta(days=7)).isoformat()
+    newest = now.date().isoformat()
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT b.id, b.user_id, b.date, b.hour
+            FROM bookings b
+            JOIN machines m ON m.id=b.machine_id
+            WHERE m.type='wash' AND b.date BETWEEN ? AND ?
+            """,
+            (oldest, newest),
+        ).fetchall()
+    inserted = 0
+    for booking_id, user_id, date_value, hour in rows:
+        try:
+            d = datetime.fromisoformat(str(date_value)).date()
+            occurred = datetime.combine(d, datetime.min.time(), tzinfo=TZ).replace(hour=int(hour))
+        except Exception:
+            continue
+        if occurred > now:
+            continue
+        with get_conn() as conn:
+            before = conn.execute(
+                "SELECT 1 FROM laundry_usage_history WHERE booking_id=? LIMIT 1",
+                (int(booking_id),),
+            ).fetchone()
+            if before:
+                continue
+            conn.execute(
+                """
+                INSERT INTO laundry_usage_history (user_id, booking_id, occurred_at)
+                VALUES (?, ?, ?)
+                ON CONFLICT(booking_id) DO NOTHING
+                """,
+                (int(user_id), int(booking_id), occurred.isoformat(timespec="seconds")),
+            )
+        inserted += 1
+    return inserted
+
+
+def usage_penalties_for_users(user_ids: list[int], now: datetime | None = None) -> dict[int, int]:
+    """Return weighted 30-day usage points: 4/3/2/1 by recency week."""
+    ids = sorted({int(x) for x in user_ids})
+    if not ids:
+        return {}
+    now = now or datetime.now(TZ)
+    cutoff = now - timedelta(days=30)
+    placeholders = ",".join(["?"] * len(ids))
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"""
+            SELECT user_id, occurred_at
+            FROM laundry_usage_history
+            WHERE user_id IN ({placeholders}) AND occurred_at>=?
+            """,
+            tuple(ids) + (cutoff.isoformat(timespec="seconds"),),
+        ).fetchall()
+    result = {uid: 0 for uid in ids}
+    for uid, occurred_at in rows:
+        try:
+            age_days = max(0, (now - datetime.fromisoformat(str(occurred_at))).days)
+        except Exception:
+            continue
+        if age_days <= 7:
+            weight = 4
+        elif age_days <= 14:
+            weight = 3
+        elif age_days <= 21:
+            weight = 2
+        elif age_days <= 30:
+            weight = 1
+        else:
+            weight = 0
+        result[int(uid)] = result.get(int(uid), 0) + weight
+    return result
