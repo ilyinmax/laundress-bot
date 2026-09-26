@@ -119,7 +119,7 @@ async def reg_room(msg: types.Message, state: FSMContext):
     if is_banned(tg_id):
         return await msg.answer("🚫 Вы заблокированы на 7 дней за нарушение правил. Попробуйте позже.")
     if not is_valid_room(room):
-        return await msg.answer("❌ Неверный номер комнаты. Введите три цифры, 100–555.")
+        return await msg.answer("❌ Неверный номер комнаты. Введите три цифры, 100-555.")
 
     data = await state.get_data()
     surname = data.get("surname", "").strip()
@@ -173,7 +173,7 @@ async def edit_room(msg: types.Message, state: FSMContext):
     if is_banned(tg_id):
         return await msg.answer("🚫 Вы заблокированы на 7 дней за нарушение правил. Попробуйте позже.")
     if not is_valid_room(room):
-        return await msg.answer("❌ Неверный номер комнаты. Введите три цифры, 100–555.")
+        return await msg.answer("❌ Неверный номер комнаты. Введите три цифры, 100-555.")
 
     data = await state.get_data()
     surname = data.get("surname", "").strip()
