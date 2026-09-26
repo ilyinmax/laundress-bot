@@ -124,19 +124,40 @@ def save_request(
             raise ValueError("Пользователь не зарегистрирован")
         user_id = int(user[0])
         old = conn.execute(
-            "SELECT id,mode,any_machine FROM waitlist_requests WHERE user_id=? AND status='active'",
+            "SELECT id,mode,any_machine,priority_since FROM waitlist_requests WHERE user_id=? AND status='active'",
             (user_id,),
         ).fetchone()
         now_s = now.isoformat(timespec="seconds")
         if old:
             request_id = int(old[0])
+            old_intervals = [
+                (int(a), int(b))
+                for a, b in conn.execute(
+                    "SELECT start_hour,end_hour FROM waitlist_intervals WHERE request_id=? ORDER BY start_hour",
+                    (request_id,),
+                ).fetchall()
+            ]
+            old_machines = {
+                int(r[0])
+                for r in conn.execute(
+                    "SELECT machine_id FROM waitlist_machines WHERE request_id=?",
+                    (request_id,),
+                ).fetchall()
+            }
+            new_machines = set() if any_machine else {int(x) for x in machine_ids}
+            conditions_changed = (
+                old_intervals != normalized
+                or bool(old[2]) != bool(any_machine)
+                or old_machines != new_machines
+            )
+            priority_since = now_s if conditions_changed else str(old[3])
             conn.execute(
                 """
                 UPDATE waitlist_requests
                 SET mode=?,any_machine=?,priority_since=?,updated_at=?
                 WHERE id=?
                 """,
-                (mode, int(bool(any_machine)), now_s, now_s, request_id),
+                (mode, int(bool(any_machine)), priority_since, now_s, request_id),
             )
             conn.execute(
                 "UPDATE slot_holds SET status='cancelled' WHERE request_id=? AND status='active'",
