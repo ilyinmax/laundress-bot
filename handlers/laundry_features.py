@@ -13,7 +13,7 @@ from apscheduler.triggers.date import DateTrigger
 
 import database
 from config import TIMEZONE
-from database import _b64d_try, get_conn, get_machine_id_by_name, is_admin, mark_reminder_sent, was_reminder_sent
+from database import _b64d_try, get_conn, get_machine_id_by_name, is_admin, mark_reminder_sent, was_reminder_sent, get_notification_settings
 from scheduler import scheduler
 
 TZ = ZoneInfo(TIMEZONE)
@@ -84,11 +84,15 @@ def text_for(b,phase,delay=None):
     if phase=="30": head,lead="⏰ <b>Напоминание</b>",f"Через <b>30 мин</b> у вас {kind}."
     elif phase=="5": head,lead="⏰ <b>Напоминание</b>",f"Через <b>5 мин</b> у вас {kind}."
     else: head,lead=f"{icon} <b>Ваша запись началась</b>",f"Сейчас у вас {kind}."
-    out=[head,"",lead,f"{icon} Машина: <b>{html.escape(str(b[5]))}</b>",f"📅 Дата: {ds(b[6])}",f"🕒 Время: {int(b[7]):02d}:00–{(int(b[7])+1)%24:02d}:00"]
+    out=[head,"",lead,f"{icon} Машина: <b>{html.escape(str(b[5]))}</b>",f"📅 Дата: {ds(b[6])}",f"🕒 Время: {int(b[7]):02d}:00-{(int(b[7])+1)%24:02d}:00"]
     if delay: out += ["",f"⚠️ Предыдущая стирка ориентировочно закончится в <b>{delay.astimezone(TZ).strftime('%H:%M')}</b>."]
     if b[4]=="wash" and phase in ("5","active"):
         t=timer_row(b[0]); out.append("")
-        out.append(f"⏱ Таймер установлен на <b>{int(t[0])} мин</b>." if t else "⏱ После запуска машинки нажмите «Поставить таймер» и укажите время с дисплея — бот напомнит за 2 минуты до конца.")
+        out.append(
+            f"⏱ Таймер установлен на <b>{int(t[0])} мин</b>."
+            if t
+            else "⏱ После запуска машинки обязательно нажмите «Поставить таймер» и укажите время с дисплея. Бот напомнит за 2 минуты до конца, чтобы следующему человеку не пришлось искать вас или писать в общий чат."
+        )
     return "\n".join(out)
 
 def foreign_now(b):
@@ -108,7 +112,24 @@ def keyboard(b,foreign=True):
 async def edit_card(bid,phase,foreign=True):
     if BOT is None: return
     b,r=booking(bid),card_row(bid)
-    if not b or not r or b[4]!="wash": return
+    if not b or b[4]!="wash": return
+    if not r:
+        try:
+            sent = await BOT.send_message(
+                int(b[2]),
+                text_for(b,phase,delay_for(b)),
+                parse_mode="HTML",
+                reply_markup=keyboard(b,foreign),
+                disable_notification=_quiet(b[1]),
+            )
+            with get_conn() as c:
+                c.execute(
+                    "INSERT INTO reminder_cards(booking_id,chat_id,message_id,delay_until) VALUES(?,?,?,?) ON CONFLICT(booking_id) DO UPDATE SET chat_id=excluded.chat_id,message_id=excluded.message_id,delay_until=excluded.delay_until",
+                    (int(b[0]),int(b[2]),int(sent.message_id),delay_for(b).isoformat() if delay_for(b) else None),
+                )
+            return
+        except Exception:
+            return
     try: await BOT.edit_message_text(chat_id=int(r[0]),message_id=int(r[1]),text=text_for(b,phase,stored_delay(bid)),parse_mode="HTML",reply_markup=keyboard(b,foreign))
     except TelegramBadRequest as e:
         if "message is not modified" not in str(e).lower() and "message to edit not found" not in str(e).lower(): raise
@@ -144,12 +165,21 @@ def schedule_card_jobs(b):
     if s>now: scheduler.add_job(activate,DateTrigger(run_date=s),id=f"lf_active_{b[0]}",args=[int(b[0])],replace_existing=True,misfire_grace_time=60)
     elif now<s+timedelta(hours=1): scheduler.add_job(activate,DateTrigger(run_date=now+timedelta(seconds=1)),id=f"lf_active_{b[0]}",args=[int(b[0])],replace_existing=True,misfire_grace_time=60)
 
+def _quiet(user_id):
+    cfg=get_notification_settings(int(user_id))
+    if not cfg["quiet_enabled"]: return False
+    h=datetime.now(TZ).hour; a,b=cfg["quiet_start"],cfg["quiet_end"]
+    return (h>=a or h<b) if a>b else (a<=h<b)
+
 async def schedule_reminder(tg_id,machine_name,date_str,hour,minutes_before=30):
     mid=get_machine_id_by_name(machine_name)
     if mid is None: return
     b=booking_for(tg_id,mid,date_str,hour)
     if not b: return
     schedule_card_jobs(b)
+    cfg=get_notification_settings(int(b[1]))
+    if int(minutes_before)==30 and not cfg["reminder_30_enabled"]:
+        return
     if was_reminder_sent(int(tg_id),int(mid),str(date_str),int(hour),int(minutes_before)): return
     now=datetime.now(TZ); rd=slot(b[6],b[7])-timedelta(minutes=int(minutes_before))
     if rd>now: scheduler.add_job(send_reminder,DateTrigger(run_date=rd),id=f"lf_rem_{b[0]}",args=[int(b[0]),int(minutes_before)],replace_existing=True,misfire_grace_time=300)
@@ -164,7 +194,7 @@ async def send_reminder(bid,minutes_before=30):
         if w: return
     if was_reminder_sent(int(b[2]),int(b[3]),ds(b[6]),int(b[7]),int(minutes_before)): return
     d=delay_for(b)
-    try: sent=await BOT.send_message(int(b[2]),text_for(b,"30",d),parse_mode="HTML")
+    try: sent=await BOT.send_message(int(b[2]),text_for(b,"30",d),parse_mode="HTML",disable_notification=_quiet(b[1]))
     except Exception: return
     if b[4]=="wash":
         with get_conn() as c: c.execute("INSERT INTO reminder_cards(booking_id,chat_id,message_id,delay_until) VALUES(?,?,?,?) ON CONFLICT(booking_id) DO UPDATE SET chat_id=excluded.chat_id,message_id=excluded.message_id,delay_until=excluded.delay_until",(int(b[0]),int(b[2]),int(sent.message_id),d.isoformat() if d else None))
@@ -178,7 +208,7 @@ async def send_pickup(bid):
     if BOT is None: return
     b,t=booking(bid),timer_row(bid)
     if not b or not t or int(t[3]): return
-    try: await BOT.send_message(int(b[2]),"🧺 <b>До конца стирки осталось 2 минуты.</b>\nПора спускаться за вещами.",parse_mode="HTML")
+    try: await BOT.send_message(int(b[2]),"🧺 <b>До конца стирки осталось 2 минуты.</b>\nПора спускаться за вещами.",parse_mode="HTML",disable_notification=_quiet(b[1]))
     except Exception: return
     with get_conn() as c: c.execute("UPDATE laundry_timers SET pickup_sent=1 WHERE booking_id=?",(int(bid),))
 
@@ -262,7 +292,7 @@ async def foreign(cb:types.CallbackQuery):
             if left.total_seconds()>0: return await cb.answer(f"Уведомление уже отправлено. Повторить можно через {max(1,math.ceil(left.total_seconds()/60))} мин.",show_alert=True)
         except Exception: pass
     if BOT is None or int(p[2])<=0: return await cb.answer("Не удалось уведомить предыдущего пользователя.",show_alert=True)
-    try: await BOT.send_message(int(p[2]),f"⚠️ <b>Ваша запись уже закончилась.</b>\nСледующий пользователь сообщает, что вещи всё ещё находятся в машине <b>{html.escape(str(p[5]))}</b>.\nПожалуйста, заберите их.",parse_mode="HTML")
+    try: await BOT.send_message(int(p[2]),f"⚠️ <b>Ваша запись уже закончилась.</b>\nСледующий пользователь сообщает, что вещи всё ещё находятся в машине <b>{html.escape(str(p[5]))}</b>.\nПожалуйста, заберите их.",parse_mode="HTML",disable_notification=_quiet(p[1]))
     except Exception: return await cb.answer("Не удалось уведомить предыдущего пользователя.",show_alert=True)
     with get_conn() as c: c.execute("INSERT INTO foreign_nudges(previous_booking_id,last_sent_at) VALUES(?,?) ON CONFLICT(previous_booking_id) DO UPDATE SET last_sent_at=excluded.last_sent_at",(prev,now.isoformat()))
     await cb.answer("Предыдущему пользователю отправлено уведомление ✅",show_alert=True)
@@ -285,9 +315,9 @@ async def users(cb:types.CallbackQuery):
     with get_conn() as c:
         total=int(c.execute("SELECT COUNT(*) FROM users").fetchone()[0]); mp=max(0,(total-1)//PAGE); page=min(page,mp)
         rows=c.execute("SELECT tg_id,surname,room,username FROM users ORDER BY id LIMIT ? OFFSET ?",(PAGE,page*PAGE)).fetchall()
-    lines=[f"👥 <b>Пользователи бота</b> — {total}"]
+    lines=[f"👥 <b>Пользователи бота</b> - {total}"]
     for i,(tg,su,ro,un) in enumerate(rows,start=page*PAGE+1):
-        surname,room=html.escape(str(_b64d_try(su) or "—")),html.escape(str(_b64d_try(ro) or "—")); uname=f"@{html.escape(str(un))}" if un else "без username"
+        surname,room=html.escape(str(_b64d_try(su) or "-")),html.escape(str(_b64d_try(ro) or "-")); uname=f"@{html.escape(str(un))}" if un else "без username"
         lines.append(f"<b>{i}. {surname}</b> · комн. {room}\n{uname} · <code>{int(tg)}</code>")
     await cb.answer()
     try: await cb.message.edit_text("\n\n".join(lines),parse_mode="HTML",reply_markup=users_kb(page,total))
