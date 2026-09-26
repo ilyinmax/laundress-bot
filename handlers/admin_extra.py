@@ -15,6 +15,7 @@ from database import (
     ensure_user_by_surname_room,
     get_conn,
     get_free_hours,
+    get_free_hours_effective,
     get_user_bookings_today,
     daily_limit_reached,
     is_admin,
@@ -357,7 +358,7 @@ async def early_choose_day(callback: types.CallbackQuery, state: FSMContext):
     for machine_id, machine_type, machine_name in machines:
         if daily_limit_reached(int(user_id), date_iso, machine_type):
             continue
-        free = get_free_hours(int(machine_id), date_iso)
+        free = get_free_hours_effective(int(machine_id), date_iso)
         if selected == today:
             now_hour = datetime.now(TZ).hour
             free = [h for h in free if h > now_hour]
@@ -424,7 +425,7 @@ async def early_choose_machine(callback: types.CallbackQuery, state: FSMContext)
     if daily_limit_reached(int(user_id), date_iso, machine_type):
         return await callback.answer("У пользователя уже есть запись на этот тип машины в этот день.", show_alert=True)
 
-    free = get_free_hours(machine_id, date_iso)
+    free = get_free_hours_effective(machine_id, date_iso)
     if selected == datetime.now(TZ).date():
         free = [h for h in free if h > datetime.now(TZ).hour]
     free = sorted(h for h in free if h in WORKING_HOURS)
@@ -520,7 +521,7 @@ async def early_confirm(callback: types.CallbackQuery, state: FSMContext):
 
     if daily_limit_reached(user_id, date_iso, machine_type):
         return await callback.answer("У пользователя уже есть запись на этот тип машины в этот день.", show_alert=True)
-    if hour not in get_free_hours(machine_id, date_iso):
+    if hour not in get_free_hours_effective(machine_id, date_iso):
         return await callback.answer("Этот слот только что заняли. Выберите другое время.", show_alert=True)
 
     try:
