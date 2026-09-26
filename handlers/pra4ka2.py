@@ -61,6 +61,11 @@ class HelpFlow(StatesGroup):
     menu = State()
 
 
+class NotificationFlow(StatesGroup):
+    quiet_start = State()
+    quiet_end = State()
+
+
 def active_waitlist(tg_id: int) -> bool:
     return bool(get_active_request_for_tg(int(tg_id)))
 
@@ -626,13 +631,14 @@ async def notification_settings(msg: types.Message, state: FSMContext):
     await state.clear()
     rows = [
         [f"🌙 Тихий режим: {'✅' if cfg['quiet_enabled'] else '❌'}"],
+        [f"🕐 Тихие часы: {cfg['quiet_start']:02d}:00-{cfg['quiet_end']:02d}:00"],
         [f"🔄 Более ранняя запись: {'✅' if cfg['earlier_offer_enabled'] else '❌'}"],
         [f"⏰ Напоминание за 30 минут: {'✅' if cfg['reminder_30_enabled'] else '❌'}"],
         ["⬅️ Назад", "🏠 Главное меню"],
     ]
     await msg.answer(
         "⚙️ <b>Настройки уведомлений</b>\n\n"
-        "🌙 Тихий режим\nНочные сообщения продолжают приходить, но без звука.\n\n"
+        f"🌙 Тихий режим\nНочные сообщения продолжают приходить, но без звука. Сейчас: {cfg['quiet_start']:02d}:00-{cfg['quiet_end']:02d}:00.\n\n"
         "🔄 Более ранняя запись\nБот может предложить подходящий слот на более ранний день.\n\n"
         "⏰ Напоминание за 30 минут\nОбычное напоминание перед вашей записью.",
         parse_mode="HTML",
@@ -774,3 +780,52 @@ async def waitlist_decline_callback(callback: types.CallbackQuery):
     except Exception:
         pass
     await callback.message.answer("Слот пропущен. Ваша заявка остаётся активной.")
+
+
+@router.message(F.text.startswith("🕐 Тихие часы:"))
+async def quiet_hours_start(msg: types.Message, state: FSMContext):
+    labels = [f"{h:02d}:00" for h in range(24)]
+    await state.set_state(NotificationFlow.quiet_start)
+    await state.update_data(quiet_start_map={label: h for h, label in enumerate(labels)})
+    rows = [labels[i:i + 4] for i in range(0, len(labels), 4)] + [["⬅️ Назад"]]
+    await msg.answer("🌙 С какого времени включать тихий режим?", reply_markup=reply_menu(rows))
+
+
+@router.message(NotificationFlow.quiet_start)
+async def quiet_start_chosen(msg: types.Message, state: FSMContext):
+    if msg.text == "⬅️ Назад":
+        return await notification_settings(msg, state)
+    data = await state.get_data()
+    start = (data.get("quiet_start_map") or {}).get(msg.text)
+    if start is None:
+        return await msg.answer("Выберите время кнопкой ниже.")
+    labels = [f"{h:02d}:00" for h in range(24) if h != int(start)]
+    await state.set_state(NotificationFlow.quiet_end)
+    await state.update_data(
+        quiet_start=int(start),
+        quiet_end_map={label: int(label[:2]) for label in labels},
+    )
+    rows = [labels[i:i + 4] for i in range(0, len(labels), 4)] + [["⬅️ Назад"]]
+    await msg.answer("🌙 До какого времени оставить уведомления тихими?", reply_markup=reply_menu(rows))
+
+
+@router.message(NotificationFlow.quiet_end)
+async def quiet_end_chosen(msg: types.Message, state: FSMContext):
+    if msg.text == "⬅️ Назад":
+        return await quiet_hours_start(msg, state)
+    data = await state.get_data()
+    end = (data.get("quiet_end_map") or {}).get(msg.text)
+    if end is None:
+        return await msg.answer("Выберите время кнопкой ниже.")
+    user = get_user(msg.from_user.id)
+    if not user:
+        return await show_home(msg, state)
+    set_notification_setting(int(user[0]), "quiet_start", int(data["quiet_start"]))
+    set_notification_setting(int(user[0]), "quiet_end", int(end))
+    await msg.answer("✅ Тихие часы обновлены.")
+    await notification_settings(msg, state)
+
+
+@router.message(F.text == "⬅️ Назад")
+async def generic_back(msg: types.Message, state: FSMContext):
+    await show_home(msg, state)
