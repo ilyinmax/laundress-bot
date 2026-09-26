@@ -22,6 +22,8 @@ from waitlist_service import (
     get_active_request_for_tg,
     cancel_request_for_tg,
     save_request,
+    accept_hold,
+    decline_hold,
 )
 
 TZ = ZoneInfo(TIMEZONE)
@@ -207,18 +209,6 @@ async def choose_hour(msg: types.Message, state: FSMContext):
     if msg.text == "🏠 Главное меню":
         return await show_home(msg, state)
     if msg.text == "⬅️ Назад":
-        data = await state.get_data()
-        date_iso = data.get("date")
-        if date_iso:
-            await state.set_state(BookFlow.date)
-            dmap = {label: iso for label, iso in booking_dates()}
-            label = next((x for x, iso in dmap.items() if iso == date_iso), None)
-            if label:
-                await state.update_data(date_map=dmap)
-                return await choose_date(types.Message.model_construct(
-                    text=label, from_user=msg.from_user, chat=msg.chat, date=msg.date,
-                    message_id=msg.message_id
-                ), state)
         return await start_booking(msg, state)
 
     data = await state.get_data()
@@ -675,7 +665,7 @@ async def help_home(msg: types.Message, state: FSMContext):
         reply_markup=reply_menu([
             ["📖 Как пользоваться ботом"],
             ["🤯 Что нового в PRA4KA 2.0"],
-            ["🔔 Лист ожидания"],
+            ["📘 Про лист ожидания"],
             ["⚖️ Как работает очередь"],
             ["⏰ Напоминания и таймер"],
             ["⚙️ Настройки уведомлений"],
@@ -698,7 +688,7 @@ HELP_TEXTS = {
         "🔔 Лист ожидания\n⚡ Автозапись или предложение слота\n🕐 До 3 удобных интервалов\n🧺 Несколько машинок или любая\n🔄 Предложения более раннего дня\n🌙 Настройки уведомлений\n⏰ Таймер стирки и напоминание забрать вещи\n⚠️ Уведомление предыдущему пользователю, если вещи остались в машинке\n\n"
         "С 23:00 до 00:00 бот распределяет часть мест новой даты между заранее созданными заявками. В 00:00 оставшиеся места открываются для обычной записи.",
 
-    "🔔 Лист ожидания":
+    "📘 Про лист ожидания":
         "🔔 <b>Лист ожидания</b>\n\n"
         "Лист ожидания позволяет заранее указать удобное для вас время, а поиск свободной записи бот возьмёт на себя.\n\n"
         "Можно выбрать до 3 интервалов, одну, несколько или любую стиральную машину.\n\n"
@@ -738,3 +728,45 @@ async def help_section(msg: types.Message, state: FSMContext):
     if not text:
         return await msg.answer("Выберите раздел кнопкой ниже.")
     await msg.answer(text, parse_mode="HTML")
+
+
+@router.callback_query(F.data.startswith("wl_accept_"))
+async def waitlist_accept_callback(callback: types.CallbackQuery, state: FSMContext):
+    try:
+        hold_id = int(callback.data.removeprefix("wl_accept_"))
+    except Exception:
+        return await callback.answer("Некорректное предложение.", show_alert=True)
+    result = await accept_hold(hold_id, callback.from_user.id)
+    if not result:
+        return await callback.answer("Этот слот уже недоступен.", show_alert=True)
+    await callback.answer("Готово ✅")
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await state.clear()
+    await callback.message.answer(
+        "✅ <b>Запись подтверждена</b>\n\n"
+        f"📅 {date_text(result.date)}\n"
+        f"🕐 {result.hour:02d}:00\n"
+        f"🧺 {result.machine_name}",
+        parse_mode="HTML",
+        reply_markup=main_kb(callback.from_user.id),
+    )
+
+
+@router.callback_query(F.data.startswith("wl_decline_"))
+async def waitlist_decline_callback(callback: types.CallbackQuery):
+    try:
+        hold_id = int(callback.data.removeprefix("wl_decline_"))
+    except Exception:
+        return await callback.answer("Некорректное предложение.", show_alert=True)
+    ok = await decline_hold(hold_id, callback.from_user.id)
+    if not ok:
+        return await callback.answer("Предложение уже неактуально.", show_alert=True)
+    await callback.answer("Хорошо")
+    try:
+        await callback.message.edit_reply_markup(reply_markup=None)
+    except Exception:
+        pass
+    await callback.message.answer("Слот пропущен. Ваша заявка остаётся активной.")
