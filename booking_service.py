@@ -180,3 +180,38 @@ async def cancel_booking_safe(
         with get_conn() as conn:
             conn.execute("DELETE FROM bookings WHERE id=?", (int(booking_id),))
         return booking
+
+
+async def move_booking_safe(
+    current_booking_id: int,
+    new_machine_id: int,
+    new_date: str,
+    new_hour: int,
+    *,
+    allowed_hold_id: int | None = None,
+) -> tuple[BookingResult, BookingResult]:
+    old = get_booking(int(current_booking_id))
+    if not old:
+        raise InvalidBooking("Исходная запись не найдена")
+    if slot_datetime(old.date, old.hour) <= datetime.now(TZ):
+        raise InvalidBooking("Начавшуюся запись переносить нельзя")
+
+    new = await create_booking_safe(
+        old.user_id,
+        int(new_machine_id),
+        str(new_date),
+        int(new_hour),
+        allowed_hold_id=allowed_hold_id,
+        close_waitlist=False,
+    )
+    try:
+        with get_conn() as conn:
+            conn.execute("DELETE FROM bookings WHERE id=?", (int(current_booking_id),))
+    except Exception:
+        try:
+            with get_conn() as conn:
+                conn.execute("DELETE FROM bookings WHERE id=?", (int(new.booking_id),))
+        except Exception:
+            pass
+        raise
+    return old, new
