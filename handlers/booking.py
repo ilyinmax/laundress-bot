@@ -17,6 +17,7 @@ from database import (
     get_user,
     get_user_bookings_today,
     get_free_hours,
+    get_free_hours_effective,
     create_booking,
     DBUnavailable
 )
@@ -149,7 +150,7 @@ def _free_per_type_for_date(date_iso: str) -> tuple[int, int]:
     free_wash_slots = 0
     free_dry_slots = 0
     for mid, mtype in machines:
-        free = get_free_hours(mid, date_iso)
+        free = get_free_hours_effective(mid, date_iso)
         if date_iso == today_iso:
             free = [h for h in free if h > now.hour]  # только будущие часы
         cnt = len(free)
@@ -164,7 +165,7 @@ def _free_per_type_for_date(date_iso: str) -> tuple[int, int]:
 
 def _free_hours_for_machine_on_date(machine_id: int, date_iso: str) -> list[int]:
     """Список СВОБОДНЫХ часов по машине на дату (для 'сегодня' - только будущие)."""
-    free = get_free_hours(machine_id, date_iso)
+    free = get_free_hours_effective(machine_id, date_iso)
     now = now_local()
     if date_iso == now.date().isoformat():
         free = [h for h in free if h > now.hour]
@@ -666,7 +667,7 @@ async def finalize(callback: types.CallbackQuery):
                     )
                     dryers = cur.fetchall()
                 for dry_id, dry_name in dryers:
-                    free = get_free_hours(dry_id, date_str)
+                    free = get_free_hours_effective(dry_id, date_str)
                     if next_hour in free:
                         text = (
                             "🌬️ Нужна сушка после стирки?\n\n"
@@ -736,7 +737,7 @@ async def auto_add_dryer(callback: types.CallbackQuery):
             text="У вас уже есть запись на сушку в этот день.",
         )
 
-    free = get_free_hours(dry_id, date_str)
+    free = get_free_hours_effective(dry_id, date_str)
     if hour not in free:
         return await safe_edit(
             callback.message,
