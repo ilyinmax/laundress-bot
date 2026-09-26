@@ -90,6 +90,10 @@ def cancel_request_for_tg(tg_id: int) -> bool:
             "UPDATE waitlist_requests SET status='cancelled',updated_at=? WHERE id=?",
             (now, int(row[0])),
         )
+        conn.execute(
+            "UPDATE slot_holds SET status='cancelled' WHERE request_id=? AND status='active'",
+            (int(row[0]),),
+        )
     return True
 
 
@@ -134,6 +138,10 @@ def save_request(
                 """,
                 (mode, int(bool(any_machine)), now_s, now_s, request_id),
             )
+            conn.execute(
+                "UPDATE slot_holds SET status='cancelled' WHERE request_id=? AND status='active'",
+                (request_id,),
+            )
             conn.execute("DELETE FROM waitlist_intervals WHERE request_id=?", (request_id,))
             conn.execute("DELETE FROM waitlist_machines WHERE request_id=?", (request_id,))
         else:
@@ -166,17 +174,29 @@ def save_request(
     return int(request_id)
 
 
-def _active_requests() -> list[Request]:
+def _active_requests(cutoff_at: str | None = None) -> list[Request]:
     with get_conn() as conn:
-        rows = conn.execute(
-            """
-            SELECT wr.id,wr.user_id,u.tg_id,wr.mode,wr.any_machine,wr.priority_since
-            FROM waitlist_requests wr
-            JOIN users u ON u.id=wr.user_id
-            WHERE wr.status='active'
-            ORDER BY wr.priority_since
-            """
-        ).fetchall()
+        if cutoff_at:
+            rows = conn.execute(
+                """
+                SELECT wr.id,wr.user_id,u.tg_id,wr.mode,wr.any_machine,wr.priority_since
+                FROM waitlist_requests wr
+                JOIN users u ON u.id=wr.user_id
+                WHERE wr.status='active' AND wr.priority_since<=?
+                ORDER BY wr.priority_since
+                """,
+                (str(cutoff_at),),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT wr.id,wr.user_id,u.tg_id,wr.mode,wr.any_machine,wr.priority_since
+                FROM waitlist_requests wr
+                JOIN users u ON u.id=wr.user_id
+                WHERE wr.status='active'
+                ORDER BY wr.priority_since
+                """
+            ).fetchall()
         interval_rows = conn.execute(
             "SELECT request_id,start_hour,end_hour FROM waitlist_intervals"
         ).fetchall()
@@ -375,7 +395,15 @@ async def _create_hold(req: Request, machine_id: int, date_iso: str, hour: int, 
 async def distribute_date(date_iso: str, *, context: str = "day") -> int:
     if not WAITLIST_ENABLED:
         return 0
-    requests = _active_requests()
+    cutoff_at = None
+    if context == "night":
+        with get_conn() as conn:
+            round_row = conn.execute(
+                "SELECT cutoff_at FROM waitlist_rounds WHERE target_date=?",
+                (str(date_iso),),
+            ).fetchone()
+        cutoff_at = str(round_row[0]) if round_row else None
+    requests = _active_requests(cutoff_at)
     slots = _free_slots(date_iso)
     if not requests or not slots:
         return 0
@@ -408,7 +436,7 @@ async def process_night_round() -> None:
     cutoff = now.replace(hour=23, minute=0, second=0, microsecond=0)
     with get_conn() as conn:
         row = conn.execute("SELECT status FROM waitlist_rounds WHERE target_date=?", (target,)).fetchone()
-        if row and str(row[0]) in {"running", "finished"}:
+        if row and str(row[0]) == "finished":
             return
         conn.execute(
             """
@@ -441,6 +469,21 @@ async def expire_holds() -> int:
                 "UPDATE slot_holds SET status='expired' WHERE id=?",
                 (int(hold_id),),
             )
+            h = conn.execute(
+                "SELECT request_id,machine_id,date,hour FROM slot_holds WHERE id=?",
+                (int(hold_id),),
+            ).fetchone()
+            if h and h[0]:
+                conn.execute(
+                    """
+                    INSERT INTO waitlist_offer_history(request_id,machine_id,date,hour,result,created_at)
+                    VALUES (?,?,?,?,?,?)
+                    """,
+                    (
+                        int(h[0]), int(h[1]), str(h[2]), int(h[3]), "expired",
+                        now.isoformat(timespec="seconds"),
+                    ),
+                )
     rerun = set()
     for _, date_iso, context in rows:
         if context == "night" and now.hour == 23:
