@@ -691,6 +691,14 @@ def get_user_bookings_today(user_id, date_iso, machine_type):
         """, (user_id, date_iso, machine_type)).fetchone()
     return bool(row)
 
+def daily_limit_reached(user_id, date_iso, machine_type):
+    """Normal users get one booking per machine type per day; admins keep their exemption."""
+    with get_conn() as conn:
+        row = conn.execute("SELECT tg_id FROM users WHERE id=?", (int(user_id),)).fetchone()
+    if row and is_admin(row[0]):
+        return False
+    return get_user_bookings_today(user_id, date_iso, machine_type)
+
 def get_user_booking_exact(user_id: int, machine_id: int, date_iso: str, hour: int) -> bool:
     with get_conn() as conn:
         row = conn.execute("""
