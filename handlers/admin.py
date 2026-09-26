@@ -599,6 +599,15 @@ async def admin_toggle_machine(callback: types.CallbackQuery):
 
     set_machine_active(mid, new_active)
 
+    if new_active:
+        with get_conn() as conn:
+            machine_row = conn.execute("SELECT type FROM machines WHERE id=?", (mid,)).fetchone()
+        if machine_row and str(machine_row[0]) == "wash":
+            from waitlist_service import distribute_date
+            today = datetime.now(TZ).date()
+            for offset in range(3):
+                await distribute_date((today + timedelta(days=offset)).isoformat(), context="day")
+
     # перерисовываем список
     text, kb = _machines_admin_view()
     try:
