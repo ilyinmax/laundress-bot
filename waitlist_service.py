@@ -394,6 +394,8 @@ async def distribute_date(date_iso: str, *, context: str = "day") -> int:
         else:
             await _create_hold(req, mid, date_iso, hour, context)
             count += 1
+    if context == "day":
+        await offer_earlier_for_date(date_iso)
     return count
 
 
@@ -477,3 +479,222 @@ async def send_pending_notifications() -> int:
         except Exception:
             pass
     return sent
+
+
+def get_hold(hold_id: int):
+    with get_conn() as conn:
+        return conn.execute(
+            """
+            SELECT h.id,h.request_id,h.user_id,u.tg_id,h.machine_id,m.name,
+                   h.date,h.hour,h.expires_at,h.context,h.current_booking_id,h.status
+            FROM slot_holds h
+            JOIN users u ON u.id=h.user_id
+            JOIN machines m ON m.id=h.machine_id
+            WHERE h.id=?
+            """,
+            (int(hold_id),),
+        ).fetchone()
+
+
+async def decline_hold(hold_id: int, tg_id: int) -> bool:
+    row = get_hold(hold_id)
+    if not row or int(row[3]) != int(tg_id) or str(row[11]) != "active":
+        return False
+    with get_conn() as conn:
+        conn.execute("UPDATE slot_holds SET status='declined' WHERE id=?", (int(hold_id),))
+        if row[1]:
+            conn.execute(
+                """
+                INSERT INTO waitlist_offer_history(request_id,machine_id,date,hour,result,created_at)
+                VALUES (?,?,?,?,?,?)
+                """,
+                (
+                    int(row[1]), int(row[4]), str(row[6]), int(row[7]),
+                    "declined", datetime.now(TZ).isoformat(timespec="seconds"),
+                ),
+            )
+    if str(row[9]) == "night" and datetime.now(TZ).hour == 23:
+        await distribute_date(str(row[6]), context="night")
+    elif str(row[9]) == "day":
+        await distribute_date(str(row[6]), context="day")
+    return True
+
+
+async def accept_hold(hold_id: int, tg_id: int):
+    row = get_hold(hold_id)
+    if not row or int(row[3]) != int(tg_id) or str(row[11]) != "active":
+        return None
+    if _dt(row[8]) <= datetime.now(TZ):
+        with get_conn() as conn:
+            conn.execute("UPDATE slot_holds SET status='expired' WHERE id=?", (int(hold_id),))
+        return None
+
+    from booking_service import move_booking_safe
+    if str(row[9]) == "move" and row[10]:
+        old, new = await move_booking_safe(
+            int(row[10]), int(row[4]), str(row[6]), int(row[7]),
+            allowed_hold_id=int(hold_id),
+        )
+        await _schedule_booking_features(new)
+        with get_conn() as conn:
+            conn.execute(
+                "UPDATE waitlist_requests SET matched_booking_id=?,updated_at=? WHERE id=?",
+                (
+                    int(new.booking_id),
+                    datetime.now(TZ).isoformat(timespec="seconds"),
+                    int(row[1]),
+                ),
+            )
+        await distribute_date(old.date, context="day")
+        return new
+
+    try:
+        result = await create_booking_safe(
+            int(row[2]), int(row[4]), str(row[6]), int(row[7]),
+            allowed_hold_id=int(hold_id),
+        )
+    except BookingError:
+        return None
+    await _schedule_booking_features(result)
+    return result
+
+
+async def offer_earlier_for_date(date_iso: str) -> int:
+    if BOT is None or not WAITLIST_ENABLED:
+        return 0
+    slots = _free_slots(date_iso)
+    if not slots:
+        return 0
+
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT wr.id,wr.user_id,u.tg_id,wr.any_machine,wr.priority_since,
+                   wr.matched_booking_id,b.date
+            FROM waitlist_requests wr
+            JOIN users u ON u.id=wr.user_id
+            JOIN bookings b ON b.id=wr.matched_booking_id
+            LEFT JOIN notification_settings ns ON ns.user_id=wr.user_id
+            WHERE wr.status='matched'
+              AND b.date>?
+              AND COALESCE(ns.earlier_offer_enabled,1)=1
+            ORDER BY wr.priority_since
+            """,
+            (str(date_iso),),
+        ).fetchall()
+        interval_rows = conn.execute(
+            "SELECT request_id,start_hour,end_hour FROM waitlist_intervals"
+        ).fetchall()
+        machine_rows = conn.execute(
+            "SELECT request_id,machine_id FROM waitlist_machines"
+        ).fetchall()
+
+    intervals = {}
+    for rid, a, b in interval_rows:
+        intervals.setdefault(int(rid), []).append((int(a), int(b)))
+    machines = {}
+    for rid, mid in machine_rows:
+        machines.setdefault(int(rid), set()).add(int(mid))
+
+    candidates = []
+    for rid, uid, tg, any_machine, priority_since, booking_id, current_date in rows:
+        if int(tg) <= 0 or is_banned(int(tg)):
+            continue
+        if active_hold_for_user(int(uid)):
+            continue
+        candidates.append(Request(
+            int(rid), int(uid), int(tg), "notify", bool(any_machine),
+            _dt(priority_since), intervals.get(int(rid), []),
+            machines.get(int(rid), set()),
+        ))
+        candidates[-1].current_booking_id = int(booking_id)
+
+    penalties = usage_penalties_for_users([c.user_id for c in candidates])
+    for c in candidates:
+        c.usage_points = int(penalties.get(c.user_id, 0))
+
+    now = datetime.now(TZ)
+    used_users = set()
+    offered = 0
+    for mid, hour in sorted(slots, key=lambda x: (x[1], x[0])):
+        compatible = [
+            c for c in candidates
+            if c.id not in used_users and c.accepts_machine(mid) and c.accepts_hour(hour)
+        ]
+        if not compatible:
+            continue
+        compatible.sort(key=lambda c: (-c.queue_score(now), c.priority_since))
+        req = compatible[0]
+        with get_conn() as conn:
+            rejected = conn.execute(
+                """
+                SELECT 1 FROM waitlist_offer_history
+                WHERE request_id=? AND machine_id=? AND date=? AND hour=?
+                  AND result IN ('declined','expired')
+                LIMIT 1
+                """,
+                (req.id, mid, str(date_iso), int(hour)),
+            ).fetchone()
+        if rejected:
+            continue
+        await _create_move_hold(req, mid, date_iso, hour, req.current_booking_id)
+        used_users.add(req.id)
+        offered += 1
+    return offered
+
+
+async def _create_move_hold(
+    req: Request,
+    machine_id: int,
+    date_iso: str,
+    hour: int,
+    current_booking_id: int,
+) -> None:
+    if BOT is None:
+        return
+    with get_conn() as conn:
+        machine = conn.execute("SELECT name FROM machines WHERE id=?", (int(machine_id),)).fetchone()
+        current = conn.execute(
+            "SELECT m.name,b.date,b.hour FROM bookings b JOIN machines m ON m.id=b.machine_id WHERE b.id=?",
+            (int(current_booking_id),),
+        ).fetchone()
+        if not machine or not current:
+            return
+        expires = datetime.now(TZ) + timedelta(minutes=HOLD_MINUTES)
+        cur = conn.execute(
+            """
+            INSERT INTO slot_holds
+            (request_id,user_id,machine_id,date,hour,expires_at,context,status,current_booking_id,created_at)
+            VALUES (?,?,?,?,?,?,'move','active',?,?)
+            """,
+            (
+                req.id, req.user_id, int(machine_id), str(date_iso), int(hour),
+                expires.isoformat(timespec="seconds"), int(current_booking_id),
+                datetime.now(TZ).isoformat(timespec="seconds"),
+            ),
+        )
+        hold_id = getattr(cur, "lastrowid", None)
+        if not hold_id:
+            hold_id = int(conn.execute(
+                "SELECT id FROM slot_holds WHERE request_id=? AND context='move' AND status='active' ORDER BY id DESC LIMIT 1",
+                (req.id,),
+            ).fetchone()[0])
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Перенести", callback_data=f"wl_accept_{hold_id}"),
+        InlineKeyboardButton(text="Оставить как есть", callback_data=f"wl_decline_{hold_id}"),
+    ]])
+    text = (
+        "🔄 <b>Можно перенести стирку раньше</b>\n\n"
+        f"Сейчас: {current[1]}, {int(current[2]):02d}:00, {current[0]}\n"
+        f"Освободилось: {date_iso}, {int(hour):02d}:00, {machine[0]}\n\n"
+        f"Новый слот удерживается {HOLD_MINUTES} минуты."
+    )
+    try:
+        await BOT.send_message(
+            req.tg_id, text, parse_mode="HTML", reply_markup=kb,
+            disable_notification=_quiet_for(req.user_id),
+        )
+    except Exception:
+        with get_conn() as conn:
+            conn.execute("UPDATE slot_holds SET status='expired' WHERE id=?", (int(hold_id),))
