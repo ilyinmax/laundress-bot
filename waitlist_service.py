@@ -171,7 +171,7 @@ def save_request(
                 """
                 INSERT INTO waitlist_requests
                 (user_id,mode,status,any_machine,created_at,priority_since,updated_at)
-                VALUES (?,?,'active',?,?,?,?,?)
+                VALUES (?,?,'active',?,?,?,?)
                 """,
                 (user_id, mode, int(bool(any_machine)), now_s, now_s, now_s),
             )
