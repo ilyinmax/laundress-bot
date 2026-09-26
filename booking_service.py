@@ -6,7 +6,7 @@ from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
 from config import TIMEZONE, WORKING_HOURS
-from database import get_conn, get_user_bookings_today, get_free_hours_effective
+from database import get_conn, get_user_bookings_today, get_free_hours_effective, is_admin
 
 TZ = ZoneInfo(TIMEZONE)
 _BOOKING_LOCK = asyncio.Lock()
@@ -90,7 +90,10 @@ async def create_booking_safe(
         if not active:
             raise InvalidBooking("Машина сейчас недоступна")
 
-        if get_user_bookings_today(int(user_id), str(date_iso), str(mtype)):
+        with get_conn() as conn:
+            tg_row = conn.execute("SELECT tg_id FROM users WHERE id=?", (int(user_id),)).fetchone()
+        admin_user = bool(tg_row and is_admin(int(tg_row[0])))
+        if not admin_user and get_user_bookings_today(int(user_id), str(date_iso), str(mtype)):
             raise DailyLimit("На этот тип машины уже есть запись в этот день")
 
         free = get_free_hours_effective(int(machine_id), str(date_iso))
