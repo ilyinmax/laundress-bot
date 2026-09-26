@@ -122,5 +122,74 @@ class Pra4ka2Tests(unittest.TestCase):
         self.assertEqual(score[uid], 4)
 
 
+    def test_matching_with_one_hundred_users(self):
+        import waitlist_service as wl
+
+        for i in range(100):
+            tg = 2000 + i
+            database.save_user(tg, f"Тест{i}", f"{200 + (i % 300):03d}")
+            if i < 8:
+                wl.save_request(tg, [(20, 21)], [], True, "auto")
+            elif i < 24:
+                wl.save_request(tg, [(18, 22)], [], True, "auto")
+            else:
+                wl.save_request(tg, [(7, 23)], [], True, "auto")
+
+        requests = wl._active_requests()
+        m1 = self.mid("Стиральная №1")
+        m3 = self.mid("Стиральная №3")
+        slots = [(mid, h) for mid in (m1, m3) for h in range(7, 23)]
+        matches = wl._match(requests, slots)
+
+        self.assertEqual(len(matches), len(slots))
+        self.assertEqual(len(set(matches.values())), len(slots))
+
+        narrow_ids = {r.id for r in requests if r.tg_id in range(2000, 2008)}
+        narrow_matched = [matches[rid] for rid in narrow_ids if rid in matches]
+        self.assertEqual(len(narrow_matched), 2)
+        self.assertTrue(all(hour == 20 for _, hour in narrow_matched))
+
+    def test_night_cutoff_excludes_late_requests(self):
+        import waitlist_service as wl
+
+        first = wl.save_request(1001, [(18, 20)], [], True, "auto")
+        second = wl.save_request(1002, [(18, 20)], [], True, "auto")
+        day = datetime.now(TZ).date().isoformat()
+        cutoff = f"{day}T23:00:00+03:00"
+
+        with database.get_conn() as conn:
+            conn.execute(
+                "UPDATE waitlist_requests SET priority_since=? WHERE id=?",
+                (f"{day}T22:30:00+03:00", first),
+            )
+            conn.execute(
+                "UPDATE waitlist_requests SET priority_since=? WHERE id=?",
+                (f"{day}T23:01:00+03:00", second),
+            )
+
+        ids = {r.id for r in wl._active_requests(cutoff)}
+        self.assertIn(first, ids)
+        self.assertNotIn(second, ids)
+
+    def test_mode_only_edit_keeps_priority(self):
+        import waitlist_service as wl
+
+        rid = wl.save_request(1001, [(18, 20)], [], True, "auto")
+        old_priority = "2026-09-20T12:00:00+03:00"
+        with database.get_conn() as conn:
+            conn.execute(
+                "UPDATE waitlist_requests SET priority_since=? WHERE id=?",
+                (old_priority, rid),
+            )
+        rid2 = wl.save_request(1001, [(18, 20)], [], True, "notify")
+        self.assertEqual(rid, rid2)
+        with database.get_conn() as conn:
+            priority = conn.execute(
+                "SELECT priority_since FROM waitlist_requests WHERE id=?",
+                (rid,),
+            ).fetchone()[0]
+        self.assertEqual(str(priority), old_priority)
+
+
 if __name__ == "__main__":
     unittest.main()
