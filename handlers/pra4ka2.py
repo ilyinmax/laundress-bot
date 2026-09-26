@@ -26,6 +26,7 @@ from waitlist_service import (
     accept_hold,
     decline_hold,
     get_hold,
+    WAITLIST_ENABLED,
 )
 
 TZ = ZoneInfo(TIMEZONE)
@@ -382,6 +383,11 @@ def _waitlist_summary(tg_id: int) -> str:
 @router.message(F.text.startswith("🔔 Лист ожидания"))
 async def waitlist_home(msg: types.Message, state: FSMContext):
     await state.clear()
+    if not WAITLIST_ENABLED:
+        return await msg.answer(
+            "🔧 Лист ожидания временно недоступен. Обычная запись работает как обычно.",
+            reply_markup=main_kb(msg.from_user.id),
+        )
     if is_banned(msg.from_user.id):
         return await msg.answer("🚫 Вы заблокированы и не можете использовать лист ожидания.", reply_markup=main_kb(msg.from_user.id))
     user = get_user(msg.from_user.id)
@@ -414,6 +420,11 @@ async def waitlist_home(msg: types.Message, state: FSMContext):
 @router.message(F.text.in_({"➕ Создать заявку", "✏️ Изменить заявку"}))
 async def waitlist_create(msg: types.Message, state: FSMContext):
     await state.clear()
+    if not WAITLIST_ENABLED:
+        return await msg.answer(
+            "🔧 Лист ожидания временно недоступен.",
+            reply_markup=main_kb(msg.from_user.id),
+        )
     await state.update_data(intervals=[])
     await state.set_state(WaitFlow.intervals)
     await msg.answer(
