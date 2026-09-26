@@ -251,6 +251,8 @@ def _active_requests(cutoff_at: str | None = None) -> list[Request]:
     for rid, uid, tg, mode, any_machine, priority_since in rows:
         if int(tg) <= 0 or is_banned(int(tg)):
             continue
+        if active_hold_for_user(int(uid)):
+            continue
         result.append(Request(
             int(rid), int(uid), int(tg), str(mode), bool(any_machine),
             _dt(priority_since), intervals.get(int(rid), []),
@@ -453,9 +455,9 @@ async def distribute_date(date_iso: str, *, context: str = "day") -> int:
     recent_requests = {int(r[0]) for r in recent_rows if r[0] is not None}
     requests = [r for r in requests if r.id not in recent_requests]
     slots = _free_slots(date_iso)
-    if not requests or not slots:
+    if not slots:
         return 0
-    matches = _match(requests, slots)
+    matches = _match(requests, slots) if requests else {}
     by_id = {r.id: r for r in requests}
     count = 0
     for rid, (mid, hour) in matches.items():
