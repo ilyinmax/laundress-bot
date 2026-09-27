@@ -25,6 +25,7 @@ from waitlist_service import (
     get_active_request_for_tg,
     cancel_request_for_tg,
     save_request,
+    check_active_waitlist,
     accept_hold,
     decline_hold,
     get_hold,
@@ -689,9 +690,11 @@ async def waitlist_confirm(msg: types.Message, state: FSMContext):
     await state.clear()
     await msg.answer(
         "✅ Вы добавлены в лист ожидания.\n\n"
-        "Если заявка создана до 23:00, она участвует в ближайшем приоритетном распределении новой даты.",
+        "Если подходящее место уже свободно, бот проверит его сразу. "
+        "Если заявка создана до 23:00, она участвует и в ближайшем приоритетном распределении новой даты.",
         reply_markup=main_kb(msg.from_user.id),
     )
+    await check_active_waitlist()
 
 
 @router.message(F.text == "❌ Отменить заявку")
