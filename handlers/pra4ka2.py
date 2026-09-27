@@ -407,7 +407,14 @@ async def cancel_confirm(msg: types.Message, state: FSMContext):
         await state.clear()
         return await msg.answer(str(exc), reply_markup=main_kb(msg.from_user.id))
     await state.clear()
-    await msg.answer("✅ Запись отменена.", reply_markup=main_kb(msg.from_user.id))
+    if getattr(old, "waitlist_reopened", False):
+        await msg.answer(
+            "✅ Запись отменена.\n\n"
+            "Ваша заявка в листе ожидания снова активна, а накопленный приоритет сохранён.",
+            reply_markup=main_kb(msg.from_user.id),
+        )
+    else:
+        await msg.answer("✅ Запись отменена.", reply_markup=main_kb(msg.from_user.id))
     from waitlist_service import distribute_date
     await distribute_date(old.date, context="day")
 
@@ -880,7 +887,9 @@ HELP_TEXTS = {
     "ℹ️ Как работает лист ожидания":
         "🔔 <b>Как работает лист ожидания</b>\n\n"
         "До 23:00 можно создать заявку. С 23:00 до 00:00 бот обрабатывает заявки на новую дату, которая ещё не видна в обычной записи. В 00:00 оставшиеся места становятся доступны всем.\n\n"
-        "Если место освобождается днём, бот тоже проверяет лист ожидания.",
+        "Если место освобождается днём, бот тоже проверяет лист ожидания.\n\n"
+        "Если вы пропустили предложенный слот или не ответили за 2 минуты, это не считается отказом от стирки: заявка остаётся активной и накопленный приоритет сохраняется.\n\n"
+        "Если AUTO уже записал вас, но вы отменили будущую запись до её начала, заявка снова становится активной с тем же приоритетом. Отменённая будущая запись не считается состоявшейся стиркой.",
 }
 
 

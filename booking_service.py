@@ -37,6 +37,7 @@ class BookingResult:
     machine_name: str
     date: str
     hour: int
+    waitlist_reopened: bool = False
 
 
 def slot_datetime(date_iso: str, hour: int) -> datetime:
@@ -303,9 +304,66 @@ async def cancel_booking_safe(
             if not row:
                 raise InvalidBooking("Запись не найдена")
             booking = _booking_from_row(row)
-            if require_future and slot_datetime(booking.date, booking.hour) <= datetime.now(TZ):
+            slot_time = slot_datetime(booking.date, booking.hour)
+            now = datetime.now(TZ)
+            if require_future and slot_time <= now:
                 raise InvalidBooking("Начавшуюся запись отменить нельзя")
+
+            waitlist_reopened = False
+            matched_request = None
+            if booking.machine_type == "wash" and slot_time > now:
+                matched_request = conn.execute(
+                    """
+                    SELECT id,priority_since
+                    FROM waitlist_requests
+                    WHERE user_id=? AND status='matched' AND matched_booking_id=?
+                    LIMIT 1
+                    """,
+                    (int(booking.user_id), int(booking_id)),
+                ).fetchone()
+
             conn.execute("DELETE FROM bookings WHERE id=?", (int(booking_id),))
+
+            if matched_request:
+                request_id = int(matched_request[0])
+                other_active = conn.execute(
+                    """
+                    SELECT 1
+                    FROM waitlist_requests
+                    WHERE user_id=? AND status='active' AND id<>?
+                    LIMIT 1
+                    """,
+                    (int(booking.user_id), request_id),
+                ).fetchone()
+
+                if not other_active:
+                    now_s = now.isoformat(timespec="seconds")
+                    conn.execute(
+                        """
+                        UPDATE waitlist_requests
+                        SET status='active',matched_booking_id=NULL,updated_at=?
+                        WHERE id=? AND status='matched'
+                        """,
+                        (now_s, request_id),
+                    )
+                    conn.execute(
+                        """
+                        INSERT INTO waitlist_offer_history
+                        (request_id,machine_id,date,hour,result,created_at)
+                        VALUES (?,?,?,?,?,?)
+                        """,
+                        (
+                            request_id,
+                            int(booking.machine_id),
+                            str(booking.date),
+                            int(booking.hour),
+                            "cancelled_booking",
+                            now_s,
+                        ),
+                    )
+                    waitlist_reopened = True
+
+            booking.waitlist_reopened = waitlist_reopened
             _commit(raw)
             return booking
         except BookingError:
