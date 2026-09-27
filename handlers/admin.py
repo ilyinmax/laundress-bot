@@ -185,7 +185,7 @@ async def open_schedule(callback: types.CallbackQuery):
             text=(today + timedelta(days=i)).strftime("%d.%m.%Y"),
             callback_data=f"admin_day_{(today + timedelta(days=i)).isoformat()}"
         )]
-        for i in range(3)
+        for i in range(4)
     ])
     await callback.message.edit_text(
         "📅 Выберите день для просмотра расписания:",

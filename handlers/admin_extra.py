@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 from calendar import monthrange
 from datetime import date, datetime, timedelta
 
@@ -54,7 +55,10 @@ def _admin_menu() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📅 Расписание", callback_data="admin_menu_schedule"),
             InlineKeyboardButton(text="📊 Статистика", callback_data="admin_menu_stats"),
         ],
-        [InlineKeyboardButton(text="👥 Пользователи", callback_data="lf_users_0")],
+        [
+            InlineKeyboardButton(text="👥 Пользователи", callback_data="lf_users_0"),
+            InlineKeyboardButton(text="🔔 Лист ожидания", callback_data="admin_waitlist_0"),
+        ],
         [InlineKeyboardButton(text="📤 Экспорт", callback_data="admin_menu_export")],
     ])
 
@@ -227,6 +231,126 @@ async def admin_home(callback: types.CallbackQuery, state: FSMContext):
         "🧺 <b>Панель администратора</b>\n\nВыберите действие:",
         reply_markup=_admin_menu(),
         parse_mode="HTML",
+    )
+
+
+WEEKDAY_SHORT = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
+ADMIN_WAITLIST_PAGE = 8
+
+
+def _fmt_dt(value) -> str:
+    try:
+        dt = datetime.fromisoformat(str(value))
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=TZ)
+        return dt.astimezone(TZ).strftime("%d.%m %H:%M")
+    except Exception:
+        return str(value)
+
+
+def _admin_waitlist_keyboard(page: int, total: int) -> InlineKeyboardMarkup:
+    pages = max(1, (total + ADMIN_WAITLIST_PAGE - 1) // ADMIN_WAITLIST_PAGE)
+    page = min(max(0, page), pages - 1)
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="‹", callback_data=f"admin_waitlist_{page-1}"))
+    nav.append(InlineKeyboardButton(text=f"{page+1}/{pages}", callback_data="admin_waitlist_noop"))
+    if page + 1 < pages:
+        nav.append(InlineKeyboardButton(text="›", callback_data=f"admin_waitlist_{page+1}"))
+    return InlineKeyboardMarkup(inline_keyboard=[
+        nav,
+        [InlineKeyboardButton(text="⬅️ В админку", callback_data="admin_extra_home")],
+    ])
+
+
+@router.callback_query(F.data == "admin_waitlist_noop")
+async def admin_waitlist_noop(callback: types.CallbackQuery):
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin_waitlist_"))
+async def admin_waitlist(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("🚫 Нет доступа.", show_alert=True)
+    try:
+        page = max(0, int(callback.data.removeprefix("admin_waitlist_")))
+    except Exception:
+        page = 0
+
+    with get_conn() as conn:
+        total = int(conn.execute(
+            "SELECT COUNT(*) FROM waitlist_requests WHERE status='active'"
+        ).fetchone()[0])
+        pages = max(1, (total + ADMIN_WAITLIST_PAGE - 1) // ADMIN_WAITLIST_PAGE)
+        page = min(page, pages - 1)
+        rows = conn.execute(
+            """
+            SELECT wr.id,u.surname,u.room,u.username,wr.mode,wr.any_machine,
+                   wr.priority_since
+            FROM waitlist_requests wr
+            JOIN users u ON u.id=wr.user_id
+            WHERE wr.status='active'
+            ORDER BY wr.priority_since,wr.id
+            LIMIT ? OFFSET ?
+            """,
+            (ADMIN_WAITLIST_PAGE, page * ADMIN_WAITLIST_PAGE),
+        ).fetchall()
+
+        ids = [int(r[0]) for r in rows]
+        intervals = {}
+        machines = {}
+        weekdays = {}
+        if ids:
+            marks = ",".join("?" for _ in ids)
+            for rid,a,b in conn.execute(
+                f"SELECT request_id,start_hour,end_hour FROM waitlist_intervals WHERE request_id IN ({marks}) ORDER BY start_hour",
+                tuple(ids),
+            ).fetchall():
+                intervals.setdefault(int(rid), []).append((int(a),int(b)))
+            for rid,name in conn.execute(
+                f"""
+                SELECT wm.request_id,m.name
+                FROM waitlist_machines wm
+                JOIN machines m ON m.id=wm.machine_id
+                WHERE wm.request_id IN ({marks})
+                ORDER BY m.name
+                """,
+                tuple(ids),
+            ).fetchall():
+                machines.setdefault(int(rid), []).append(str(name))
+            for rid,weekday in conn.execute(
+                f"SELECT request_id,weekday FROM waitlist_weekdays WHERE request_id IN ({marks}) ORDER BY weekday",
+                tuple(ids),
+            ).fetchall():
+                weekdays.setdefault(int(rid), []).append(int(weekday))
+
+    lines = [f"🔔 <b>Активные заявки: {total}</b>"]
+    if not rows:
+        lines.append("")
+        lines.append("Активных заявок нет.")
+    for idx,(rid,surname,room,username,mode,any_machine,priority_since) in enumerate(
+        rows, start=page * ADMIN_WAITLIST_PAGE + 1
+    ):
+        su = html.escape(str(_b64d_try(surname) or "-"))
+        ro = html.escape(str(_b64d_try(room) or "-"))
+        un = f"@{html.escape(str(username))}" if username else "без username"
+        day_values = weekdays.get(int(rid), [])
+        day_text = "любой день" if not day_values else ",".join(WEEKDAY_SHORT[x] for x in day_values)
+        time_text = ", ".join(f"{a:02d}:00-{b:02d}:00" for a,b in intervals.get(int(rid), [])) or "-"
+        machine_text = "любая" if bool(any_machine) else ", ".join(machines.get(int(rid), [])) or "-"
+        mode_text = "AUTO" if str(mode) == "auto" else "спросить"
+        lines += [
+            "",
+            f"<b>{idx}. {su}</b> · комн. {ro} · {un}",
+            f"📆 {day_text} · 🕐 {html.escape(time_text)}",
+            f"🧺 {html.escape(machine_text)} · {mode_text} · с {_fmt_dt(priority_since)}",
+        ]
+
+    await callback.answer()
+    await callback.message.edit_text(
+        "\n".join(lines),
+        parse_mode="HTML",
+        reply_markup=_admin_waitlist_keyboard(page,total),
     )
 
 

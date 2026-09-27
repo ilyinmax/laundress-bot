@@ -40,6 +40,7 @@ MONTHS = (
     "июля", "августа", "сентября", "октября", "ноября", "декабря",
 )
 WEEKDAYS = ("Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье")
+WEEKDAY_SHORT = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
 
 
 class BookFlow(StatesGroup):
@@ -58,6 +59,7 @@ class WaitFlow(StatesGroup):
     interval_start = State()
     interval_end = State()
     intervals = State()
+    weekdays = State()
     machines = State()
     mode = State()
     confirm = State()
@@ -428,11 +430,17 @@ def _waitlist_summary(tg_id: int) -> str:
             """,
             (int(rid),),
         ).fetchall()
+        weekdays = conn.execute(
+            "SELECT weekday FROM waitlist_weekdays WHERE request_id=? ORDER BY weekday",
+            (int(rid),),
+        ).fetchall()
     times = ", ".join(f"{int(a):02d}:00-{int(b):02d}:00" for a, b in intervals)
     machine_text = "Любая стиральная машина" if any_machine else ", ".join(str(x[0]) for x in machines)
+    day_text = "Любой день" if not weekdays else ", ".join(WEEKDAY_SHORT[int(x[0])] for x in weekdays)
     mode_text = "Автозапись" if mode == "auto" else "Сначала спросить"
     return (
         "🔔 <b>Активная заявка</b>\n\n"
+        f"📆 {day_text}\n"
         f"🕐 {times}\n"
         f"🧺 {machine_text}\n"
         f"⚡ Режим: {mode_text}"
@@ -510,7 +518,7 @@ async def interval_menu(msg: types.Message, state: FSMContext):
         intervals = data.get("intervals", [])
         if not intervals:
             return await msg.answer("Добавьте хотя бы один интервал.")
-        return await show_waitlist_machines(msg, state)
+        return await show_waitlist_weekdays(msg, state)
     await msg.answer("Выберите действие кнопкой ниже.")
 
 
@@ -561,6 +569,66 @@ async def interval_end(msg: types.Message, state: FSMContext):
     )
 
 
+async def show_waitlist_weekdays(msg: types.Message, state: FSMContext):
+    data = await state.get_data()
+    selected = set(int(x) for x in data.get("selected_weekdays", []))
+    any_day = bool(data.get("any_day", True))
+    await state.set_state(WaitFlow.weekdays)
+    await state.update_data(selected_weekdays=list(selected), any_day=any_day)
+
+    rows = [["✅ Любой день" if any_day else "⬜ Любой день"]]
+    first = []
+    second = []
+    for idx, label in enumerate(WEEKDAY_SHORT):
+        text = f"{'✅' if idx in selected else '⬜'} {label}"
+        (first if idx < 4 else second).append(text)
+    rows += [first, second, ["✅ Продолжить"], ["⬅️ Назад", "🏠 Главное меню"]]
+    await msg.answer(
+        "📆 Какие дни недели вам подходят?\n\n"
+        "Можно оставить любой день или выбрать несколько дней недели. "
+        "Это не конкретная дата: заявка будет ждать ближайший подходящий день.",
+        reply_markup=reply_menu(rows),
+    )
+
+
+@router.message(WaitFlow.weekdays)
+async def waitlist_weekdays(msg: types.Message, state: FSMContext):
+    if msg.text == "🏠 Главное меню":
+        return await show_home(msg, state)
+    if msg.text == "⬅️ Назад":
+        await state.set_state(WaitFlow.intervals)
+        return await msg.answer(
+            "🕐 Интервалы",
+            reply_markup=reply_menu([["➕ Добавить интервал"], ["✅ Продолжить"], ["🏠 Главное меню"]]),
+        )
+
+    data = await state.get_data()
+    selected = set(int(x) for x in data.get("selected_weekdays", []))
+    any_day = bool(data.get("any_day", True))
+
+    if msg.text == "✅ Продолжить":
+        if not any_day and not selected:
+            return await msg.answer("Выберите хотя бы один день недели или «Любой день».")
+        return await show_waitlist_machines(msg, state)
+
+    if msg.text in {"✅ Любой день", "⬜ Любой день"}:
+        any_day = True
+        selected.clear()
+    else:
+        raw = (msg.text or "").replace("✅ ", "").replace("⬜ ", "")
+        if raw not in WEEKDAY_SHORT:
+            return await msg.answer("Выберите день кнопкой ниже.")
+        idx = WEEKDAY_SHORT.index(raw)
+        any_day = False
+        if idx in selected:
+            selected.remove(idx)
+        else:
+            selected.add(idx)
+
+    await state.update_data(selected_weekdays=list(selected), any_day=any_day)
+    return await show_waitlist_weekdays(msg, state)
+
+
 async def show_waitlist_machines(msg: types.Message, state: FSMContext):
     with get_conn() as conn:
         rows = conn.execute(
@@ -584,11 +652,7 @@ async def waitlist_machines(msg: types.Message, state: FSMContext):
     if msg.text == "🏠 Главное меню":
         return await show_home(msg, state)
     if msg.text == "⬅️ Назад":
-        await state.set_state(WaitFlow.intervals)
-        return await msg.answer(
-            "🕐 Интервалы",
-            reply_markup=reply_menu([["➕ Добавить интервал"], ["✅ Продолжить"], ["🏠 Главное меню"]]),
-        )
+        return await show_waitlist_weekdays(msg, state)
     data = await state.get_data()
     if msg.text == "✅ Продолжить":
         if not data.get("any_machine") and not data.get("selected_machines"):
@@ -654,9 +718,12 @@ async def waitlist_mode(msg: types.Message, state: FSMContext):
         reverse = {v: k for k, v in (data.get("machine_map") or {}).items()}
         machines = ", ".join(reverse.get(x, str(x)) for x in data.get("selected_machines", []))
     mode_text = "Автозапись" if mode == "auto" else "Сначала спросить"
+    selected_days = sorted(int(x) for x in data.get("selected_weekdays", []))
+    day_text = "Любой день" if data.get("any_day", True) else ", ".join(WEEKDAY_SHORT[x] for x in selected_days)
     await state.set_state(WaitFlow.confirm)
     await msg.answer(
         "🔔 <b>Новая заявка</b>\n\n"
+        f"📆 Дни: {day_text}\n"
         f"🕐 Время:\n{times}\n\n"
         f"🧺 Машинки: {machines}\n"
         f"⚡ Режим: {mode_text}\n\n"
@@ -683,6 +750,7 @@ async def waitlist_confirm(msg: types.Message, state: FSMContext):
             data.get("selected_machines", []),
             bool(data.get("any_machine")),
             data.get("mode"),
+            [] if data.get("any_day", True) else data.get("selected_weekdays", []),
         )
     except ValueError as exc:
         await state.clear()
@@ -788,7 +856,8 @@ HELP_TEXTS = {
     "📘 Про лист ожидания":
         "🔔 <b>Лист ожидания</b>\n\n"
         "Лист ожидания позволяет заранее указать удобное для вас время, а поиск свободной записи бот возьмёт на себя.\n\n"
-        "Можно выбрать до 3 интервалов, одну, несколько или любую стиральную машину.\n\n"
+        "Можно выбрать до 3 интервалов, подходящие дни недели, одну, несколько или любую стиральную машину.\n\n"
+        "Если дни недели не важны, оставьте «Любой день». Если, например, во вторник нет пар, можно выбрать только Вт и удобное утреннее время.\n\n"
         "⚡ Автозапись: бот сам занимает подходящее место.\n\n"
         "🔔 Сначала спросить: бот предлагает конкретный слот и удерживает его 2 минуты.\n\n"
         "Конкретную дату выбирать не нужно. После получения записи заявка закрывается.",
