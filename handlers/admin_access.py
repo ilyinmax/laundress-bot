@@ -177,7 +177,7 @@ async def cmd_addadmin(msg: types.Message):
     if tg_id is None:
         return await msg.answer(
             "❗ Не нашёл этого пользователя.\n\n"
-            "Пусть он хотя бы один раз откроет бота и нажмёт /start — после этого "
+            "Пусть он хотя бы один раз откроет бота и нажмёт /start - после этого "
             "я смогу определить его Telegram ID по @username."
         )
 
@@ -242,7 +242,7 @@ async def cmd_admins(msg: types.Message):
     for tg_id in sorted(ROOT_ADMIN_IDS):
         username = _username_for_id(tg_id)
         label = f"@{username}" if username else "без username"
-        lines.append(f"• {label} — <code>{tg_id}</code>")
+        lines.append(f"• {label} - <code>{tg_id}</code>")
 
     lines.append("\n<b>Добавленные через /addadmin:</b>")
     dynamic = list_dynamic_admins()
@@ -251,6 +251,6 @@ async def cmd_admins(msg: types.Message):
     else:
         for tg_id, username, added_by in dynamic:
             label = f"@{username}" if username else "без username"
-            lines.append(f"• {label} — <code>{tg_id}</code>")
+            lines.append(f"• {label} - <code>{tg_id}</code>")
 
     await msg.answer("\n".join(lines), parse_mode="HTML")

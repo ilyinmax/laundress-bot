@@ -47,9 +47,48 @@ def setup_scheduler():
             cleanup_old_bookings,
             trigger="cron",
             hour=0,
-            minute=0,
+            minute=5,
             id="cleanup_daily",
             replace_existing=True,
+        )
+        from database import record_usage_history
+        from waitlist_service import (
+            process_night_round,
+            expire_holds,
+            send_pending_notifications,
+        )
+        scheduler.add_job(
+            process_night_round,
+            trigger="cron",
+            hour=23,
+            minute=0,
+            id="waitlist_night_round",
+            replace_existing=True,
+            misfire_grace_time=3600,
+        )
+        scheduler.add_job(
+            expire_holds,
+            trigger="interval",
+            seconds=20,
+            id="waitlist_expire_holds",
+            replace_existing=True,
+            misfire_grace_time=60,
+        )
+        scheduler.add_job(
+            send_pending_notifications,
+            trigger="interval",
+            seconds=20,
+            id="waitlist_pending_notifications",
+            replace_existing=True,
+            misfire_grace_time=60,
+        )
+        scheduler.add_job(
+            record_usage_history,
+            trigger="interval",
+            minutes=10,
+            id="usage_history_tick",
+            replace_existing=True,
+            misfire_grace_time=600,
         )
         # сторож: каждую минуту проверяем, не пришло ли время напоминания
         '''
@@ -77,7 +116,7 @@ async def schedule_reminder(
     minutes_before: int = 30,
 ):
     """
-    Постановка обычного напоминания (tg_id — именно Telegram ID, а не users.id).
+    Постановка обычного напоминания (tg_id - именно Telegram ID, а не users.id).
     """
     try:
         d = datetime.fromisoformat(date_str).date()
@@ -88,7 +127,7 @@ async def schedule_reminder(
     reminder_dt = slot_dt - timedelta(minutes=minutes_before)
     now = datetime.now(TZ)
 
-    # если уже пора / чуть опоздали — шлём сразу
+    # если уже пора / чуть опоздали - шлём сразу
     if now >= reminder_dt:
         if (now - reminder_dt).total_seconds() <= LATE_WINDOW_SEC:
             await send_reminder(tg_id, machine_name, d.isoformat(), hour, minutes_before)
@@ -117,7 +156,7 @@ async def send_reminder(
     allow_late: bool = False
 ):
     """
-    Отправка напоминания. tg_id — Telegram ID.
+    Отправка напоминания. tg_id - Telegram ID.
 
     Здесь:
     - проверяем, что бронь ещё существует;
@@ -143,7 +182,7 @@ async def send_reminder(
         if (now - reminder_dt).total_seconds() > LATE_WINDOW_SEC:
             return
     '''
-    # сильно опоздали — выходим
+    # сильно опоздали - выходим
     if (now - reminder_dt).total_seconds() > LATE_WINDOW_SEC:
         return
     '''
@@ -153,7 +192,7 @@ async def send_reminder(
     # определяем машину и её тип
     m_id = get_machine_id_by_name(machine_name)
     if m_id is None:
-        # если по имени не нашли машину — лучше вообще ничего не слать
+        # если по имени не нашли машину - лучше вообще ничего не слать
         return
 
     with get_conn() as conn:
@@ -180,7 +219,7 @@ async def send_reminder(
         ).fetchone()
 
     if not exists:
-        # запись отменена или перенесена — не шлём
+        # запись отменена или перенесена - не шлём
         return
 
     # 2) если это СУШКА и сразу перед ней есть СТИРКА этого же пользователя,
@@ -203,7 +242,7 @@ async def send_reminder(
                 (tg_id, date_iso, prev_hour),
             ).fetchone()
         if has_wash_prev:
-            # сразу после стирки идёт сушка — напоминание для сушилки не нужно
+            # сразу после стирки идёт сушка - напоминание для сушилки не нужно
             return
 
     # 3) антидубли (фиксируем по tg_id + machine_id + дате/часу)
@@ -240,7 +279,7 @@ async def send_reminder(
     try:
         await BOT_REF.send_message(tg_id, text, parse_mode="HTML")
     except Exception:
-        # если не смогли отправить (пользователь заблокировал бота и т.п.) —
+        # если не смогли отправить (пользователь заблокировал бота и т.п.) -
         # просто выходим, чтобы не спамить ретраями
         return
 
@@ -325,13 +364,13 @@ async def schedule_test_message(
 
 
 # =========================================================
-#        Сторож: если джоба умерла — добьём вручную
+#        Сторож: если джоба умерла - добьём вручную
 # =========================================================
 async def watchdog_tick(minutes_before: int = 30):
     """
     Каждую минуту смотрим все брони на сегодня и завтра.
     Если сейчас попали в окно [reminder_dt, reminder_dt + LATE_WINDOW_SEC]
-    и отметки в reminders_sent ещё нет — шлём напоминание.
+    и отметки в reminders_sent ещё нет - шлём напоминание.
 
     Здесь тоже ВАЖНО: используем u.tg_id, а не bookings.user_id.
     """

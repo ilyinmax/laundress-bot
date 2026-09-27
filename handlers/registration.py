@@ -10,7 +10,7 @@ from database import (
     register_failed_attempt, reset_failed_attempts,
     update_username,
 )
-from keyboards import main_menu, start_menu
+from keyboards import main_menu, start_menu, build_main_menu
 
 import re
 
@@ -55,7 +55,12 @@ async def start_cmd(msg: types.Message, state: FSMContext):
         text = ("👋 <b>С возвращением!</b>\n\n"
                 "Вы уже зарегистрированы.\n"
                 "Выберите действие из меню ниже 👇")
-        return await msg.answer(text, reply_markup=main_menu, parse_mode="HTML")
+        from waitlist_service import get_active_request_for_tg
+        return await msg.answer(
+            text,
+            reply_markup=build_main_menu(bool(get_active_request_for_tg(tg_id))),
+            parse_mode="HTML",
+        )
 
     welcome_text = (
         "Чтобы начать, нажмите кнопку ниже 👇\n\n"
@@ -114,7 +119,7 @@ async def reg_room(msg: types.Message, state: FSMContext):
     if is_banned(tg_id):
         return await msg.answer("🚫 Вы заблокированы на 7 дней за нарушение правил. Попробуйте позже.")
     if not is_valid_room(room):
-        return await msg.answer("❌ Неверный номер комнаты. Введите три цифры, 100–555.")
+        return await msg.answer("❌ Неверный номер комнаты. Введите три цифры, 100-555.")
 
     data = await state.get_data()
     surname = data.get("surname", "").strip()
@@ -168,13 +173,17 @@ async def edit_room(msg: types.Message, state: FSMContext):
     if is_banned(tg_id):
         return await msg.answer("🚫 Вы заблокированы на 7 дней за нарушение правил. Попробуйте позже.")
     if not is_valid_room(room):
-        return await msg.answer("❌ Неверный номер комнаты. Введите три цифры, 100–555.")
+        return await msg.answer("❌ Неверный номер комнаты. Введите три цифры, 100-555.")
 
     data = await state.get_data()
     surname = data.get("surname", "").strip()
 
     save_user(tg_id, surname, room)
-    await msg.answer(f"✅ Данные обновлены!\nФамилия: {surname}\nКомната: {room}")
+    from waitlist_service import get_active_request_for_tg
+    await msg.answer(
+        f"✅ Данные обновлены!\nФамилия: {surname}\nКомната: {room}",
+        reply_markup=build_main_menu(bool(get_active_request_for_tg(tg_id))),
+    )
     await state.clear()
 
 # --- кнопка из рассылки «Заполнить профиль» ---

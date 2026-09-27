@@ -1,5 +1,7 @@
 import os
 import asyncio
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from aiohttp import web
 
 from aiogram import Bot, Dispatcher
@@ -48,6 +50,8 @@ dp = Dispatcher()
 
 # === Подключаем роутеры ===
 from handlers.registration import router as registration_router  # noqa: E402
+from handlers.pra4ka2 import router as pra4ka2_router  # noqa: E402
+from waitlist_service import attach_bot as attach_waitlist_bot, process_night_round  # noqa: E402
 from handlers.booking import router as booking_router  # noqa: E402
 from handlers.admin_access import router as admin_access_router, sync_dynamic_admins  # noqa: E402
 from handlers.admin_extra import router as admin_extra_router  # noqa: E402
@@ -56,18 +60,14 @@ from handlers.laundry_features import (  # noqa: E402
     router as laundry_features_router,
     attach_feature_bot,
     init_feature_tables,
-    install_feature_hooks,
     rebuild_feature_jobs,
 )
-
-# Подменяем только нужные точки старой логики: дневной лимит админов,
-# постановку новых карточек-напоминаний и кнопку пользователей в /admin.
-install_feature_hooks()
 
 # laundry_features идёт раньше booking_router, чтобы именно на кнопке
 # «🧺 Записаться» обновлять username, а затем запускать старый сценарий записи.
 dp.include_routers(
     registration_router,
+    pra4ka2_router,
     laundry_features_router,
     booking_router,
     admin_access_router,
@@ -113,6 +113,7 @@ async def background_init(app: web.Application):
         setup_scheduler()
         attach_bot(bot)
         attach_feature_bot(bot)
+        attach_waitlist_bot(bot)
 
         try:
             await setup_bot_commands(bot)
@@ -124,6 +125,8 @@ async def background_init(app: web.Application):
 
         global REMINDERS_TASK, WH_RETRY_TASK
         REMINDERS_TASK = asyncio.create_task(rebuild_feature_jobs(hours=48))
+        if datetime.now(ZoneInfo("Europe/Moscow")).hour == 23:
+            asyncio.create_task(process_night_round())
 
         try:
             await bot.set_webhook(WEBHOOK_URL, drop_pending_updates=False, request_timeout=20)

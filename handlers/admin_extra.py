@@ -12,14 +12,16 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from config import TIMEZONE, WORKING_HOURS
 from database import (
     _b64d_try,
-    create_booking,
     ensure_user_by_surname_room,
     get_conn,
     get_free_hours,
+    get_free_hours_effective,
     get_user_bookings_today,
+    daily_limit_reached,
     is_admin,
 )
 from zoneinfo import ZoneInfo
+from booking_service import create_booking_safe, BookingError
 
 TZ = ZoneInfo(TIMEZONE)
 router = Router()
@@ -52,6 +54,7 @@ def _admin_menu() -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="📅 Расписание", callback_data="admin_menu_schedule"),
             InlineKeyboardButton(text="📊 Статистика", callback_data="admin_menu_stats"),
         ],
+        [InlineKeyboardButton(text="👥 Пользователи", callback_data="lf_users_0")],
         [InlineKeyboardButton(text="📤 Экспорт", callback_data="admin_menu_export")],
     ])
 
@@ -59,34 +62,34 @@ def _admin_menu() -> InlineKeyboardMarkup:
 ADMIN_COMMANDS_TEXT = """🧺 <b>Все команды бота</b>
 
 <b>Пользовательские:</b>
-/start — запуск и регистрация
-/book — записаться
-/mybookings — мои активные записи
-/cancel — отменить запись
-/edit — изменить фамилию и комнату
-/help — помощь
+/start - запуск и регистрация
+/book - записаться
+/mybookings - мои активные записи
+/cancel - отменить запись
+/edit - изменить фамилию и комнату
+/help - помощь
 
 <b>Администраторские:</b>
-/admin — панель администратора
-/early — ⭐ ранняя запись на любую дату
-/admin_commands — этот список команд
-/export — экспорт записей в Excel
-/import — импорт записей из Excel
-/machines — включить/выключить машины
-/ban — заблокировать пользователя
-/unban — разблокировать пользователя
-/banned — список заблокированных
-/abookfio — ручная запись старым способом
-/notify_incomplete — напомнить заполнить профиль
-/test_reminder — тест напоминания
-/laundry_news — разослать список работающих машин
+/admin - панель администратора
+/early - ⭐ ранняя запись на любую дату
+/admin_commands - этот список команд
+/export - экспорт записей в Excel
+/import - импорт записей из Excel
+/machines - включить/выключить машины
+/ban - заблокировать пользователя
+/unban - разблокировать пользователя
+/banned - список заблокированных
+/abookfio - ручная запись старым способом
+/notify_incomplete - напомнить заполнить профиль
+/test_reminder - тест напоминания
+/laundry_news - разослать список работающих машин
 
 💡 Для обычной работы достаточно <b>/admin</b>: ранняя запись теперь делается кнопками, без machine_id и длинной команды."""
 
 
 def _target_text(data: dict) -> str:
-    surname = data.get("target_surname") or "—"
-    room = data.get("target_room") or "—"
+    surname = data.get("target_surname") or "-"
+    room = data.get("target_room") or "-"
     return f"{surname}, комн. {room}"
 
 
@@ -353,9 +356,9 @@ async def early_choose_day(callback: types.CallbackQuery, state: FSMContext):
 
     rows: list[list[InlineKeyboardButton]] = []
     for machine_id, machine_type, machine_name in machines:
-        if get_user_bookings_today(int(user_id), date_iso, machine_type):
+        if daily_limit_reached(int(user_id), date_iso, machine_type):
             continue
-        free = get_free_hours(int(machine_id), date_iso)
+        free = get_free_hours_effective(int(machine_id), date_iso)
         if selected == today:
             now_hour = datetime.now(TZ).hour
             free = [h for h in free if h > now_hour]
@@ -365,7 +368,7 @@ async def early_choose_day(callback: types.CallbackQuery, state: FSMContext):
         icon = "🧺" if machine_type == "wash" else "🌬️"
         rows.append([
             InlineKeyboardButton(
-                text=f"{icon} {machine_name} — {len(free)} свободно",
+                text=f"{icon} {machine_name} - {len(free)} свободно",
                 callback_data=f"early_machine_{int(machine_id)}_{date_iso}",
             )
         ])
@@ -419,10 +422,10 @@ async def early_choose_machine(callback: types.CallbackQuery, state: FSMContext)
     user_id = data.get("target_user_id")
     if not user_id:
         return await callback.message.edit_text("Сессия устарела. Откройте /early заново.")
-    if get_user_bookings_today(int(user_id), date_iso, machine_type):
+    if daily_limit_reached(int(user_id), date_iso, machine_type):
         return await callback.answer("У пользователя уже есть запись на этот тип машины в этот день.", show_alert=True)
 
-    free = get_free_hours(machine_id, date_iso)
+    free = get_free_hours_effective(machine_id, date_iso)
     if selected == datetime.now(TZ).date():
         free = [h for h in free if h > datetime.now(TZ).hour]
     free = sorted(h for h in free if h in WORKING_HOURS)
@@ -516,15 +519,21 @@ async def early_confirm(callback: types.CallbackQuery, state: FSMContext):
         await state.clear()
         return await callback.message.edit_text("Сессия устарела. Откройте /early заново.")
 
-    if get_user_bookings_today(user_id, date_iso, machine_type):
+    if daily_limit_reached(user_id, date_iso, machine_type):
         return await callback.answer("У пользователя уже есть запись на этот тип машины в этот день.", show_alert=True)
-    if hour not in get_free_hours(machine_id, date_iso):
+    if hour not in get_free_hours_effective(machine_id, date_iso):
         return await callback.answer("Этот слот только что заняли. Выберите другое время.", show_alert=True)
 
     try:
-        create_booking(user_id, machine_id, date_iso, hour)
-    except Exception:
+        result = await create_booking_safe(user_id, machine_id, date_iso, hour)
+    except BookingError:
         return await callback.answer("Не удалось создать запись. Возможно, слот уже занят.", show_alert=True)
+
+    with get_conn() as conn:
+        tg_row = conn.execute("SELECT tg_id FROM users WHERE id=?", (user_id,)).fetchone()
+    if tg_row and int(tg_row[0]) > 0:
+        from handlers.laundry_features import schedule_reminder
+        await schedule_reminder(int(tg_row[0]), result.machine_name, result.date, result.hour, 30)
 
     selected = date.fromisoformat(date_iso)
     target = _target_text(data)

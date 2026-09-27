@@ -9,6 +9,6 @@ WASHING_MACHINES = ["Стиральная №1", "Стиральная №3", "�
 DRYERS = ["Сушилка №2", "Сушилка №4"]
 
 
-WORKING_HOURS = list(range(7, 23))  # 9–23
+WORKING_HOURS = list(range(7, 23))  # слоты 07:00-22:00, окончание последнего в 23:00
 BOOKING_DAYS_AHEAD = 3  # сегодня + 2 дня вперёд
 DB_PATH = "laundry.db"

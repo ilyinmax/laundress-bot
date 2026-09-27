@@ -9,19 +9,20 @@ from zoneinfo import ZoneInfo
 
 from config import TIMEZONE, WORKING_HOURS
 from keyboards import main_menu
-from scheduler import schedule_reminder
+from booking_service import create_booking_safe, cancel_booking_safe, BookingError, DailyLimit, SlotBusy, InvalidBooking
 from database import (
     is_banned,
     get_conn,
     get_user,
     get_user_bookings_today,
+    daily_limit_reached,
     get_free_hours,
-    create_booking,
+    get_free_hours_effective,
     DBUnavailable
 )
 from sqlite3 import IntegrityError  # для SQLite
 
-# Для Postgres: корректно подхватить UniqueViolation, а без psycopg2 — сделать безопасную заглушку-класс
+# Для Postgres: корректно подхватить UniqueViolation, а без psycopg2 - сделать безопасную заглушку-класс
 try:
     from psycopg2.errors import UniqueViolation  # type: ignore
 except Exception:
@@ -30,6 +31,11 @@ except Exception:
 
 
 TZ = ZoneInfo(TIMEZONE)
+
+async def schedule_reminder(tg_id, machine_name, date_str, hour, minutes_before=30):
+    from handlers.laundry_features import schedule_reminder as feature_schedule_reminder
+    return await feature_schedule_reminder(tg_id, machine_name, date_str, hour, minutes_before)
+
 
 
 def now_local() -> datetime:
@@ -148,7 +154,7 @@ def _free_per_type_for_date(date_iso: str) -> tuple[int, int]:
     free_wash_slots = 0
     free_dry_slots = 0
     for mid, mtype in machines:
-        free = get_free_hours(mid, date_iso)
+        free = get_free_hours_effective(mid, date_iso)
         if date_iso == today_iso:
             free = [h for h in free if h > now.hour]  # только будущие часы
         cnt = len(free)
@@ -162,8 +168,8 @@ def _free_per_type_for_date(date_iso: str) -> tuple[int, int]:
 '''
 
 def _free_hours_for_machine_on_date(machine_id: int, date_iso: str) -> list[int]:
-    """Список СВОБОДНЫХ часов по машине на дату (для 'сегодня' — только будущие)."""
-    free = get_free_hours(machine_id, date_iso)
+    """Список СВОБОДНЫХ часов по машине на дату (для 'сегодня' - только будущие)."""
+    free = get_free_hours_effective(machine_id, date_iso)
     now = now_local()
     if date_iso == now.date().isoformat():
         free = [h for h in free if h > now.hour]
@@ -171,7 +177,7 @@ def _free_hours_for_machine_on_date(machine_id: int, date_iso: str) -> list[int]
 
 
 # =========================================================
-#        /book → Дата → Машина (все типы) → Время
+#        /book -> Дата -> Машина (все типы) -> Время
 # =========================================================
 # --- /book: выбор даты ---
 @router.message(F.text == "/book")
@@ -205,7 +211,7 @@ async def choose_date_first(
         user = get_user(uid)
         if not user or not (user[2] and user[3]):
             return await msg.answer(
-                "Сначала завершите регистрацию: /start → фамилия и номер комнаты."
+                "Сначала завершите регистрацию: /start -> фамилия и номер комнаты."
             )
 
         now = now_local()
@@ -226,7 +232,7 @@ async def choose_date_first(
                 continue
 
             free_wash, free_dry = _free_per_type_for_date(d_iso)
-            caption = f"📅 {d.strftime('%d.%m')} — 🧺 {free_wash} / 🌬️ {free_dry}"
+            caption = f"📅 {d.strftime('%d.%m')} - 🧺 {free_wash} / 🌬️ {free_dry}"
             days_buttons.append(
                 [InlineKeyboardButton(text=caption, callback_data=f"date_{d_iso}")]
             )
@@ -271,7 +277,7 @@ async def _show_machines_for_date(message: Message, date: str):
         header_date = d_obj.strftime("%d.%m.%Y")
     except Exception:
         header_date = date
-    lines.append(f"📅 {header_date} — свободные слоты\n")
+    lines.append(f"📅 {header_date} - свободные слоты\n")
 
     rows_btn: list[list[InlineKeyboardButton]] = []
 
@@ -354,7 +360,7 @@ async def _show_machines_for_date(message: Message, date: str):
     except Exception:
         header_date = date
 
-    lines: list[str] = [f"📅 {header_date} — свободные слоты\n"]
+    lines: list[str] = [f"📅 {header_date} - свободные слоты\n"]
     rows_btn: list[list[InlineKeyboardButton]] = []
 
     now = now_local()
@@ -404,7 +410,7 @@ async def _show_machines_for_date(message: Message, date: str):
     await safe_edit(message, text="\n".join(lines).rstrip(), reply_markup=kb)
 
 
-# Выбрали дату → показываем ВСЕ машины (wash+dry) и список свободных слотов
+# Выбрали дату -> показываем ВСЕ машины (wash+dry) и список свободных слотов
 @router.callback_query(F.data.startswith("date_"))
 async def choose_machine_for_date(callback: types.CallbackQuery):
     await callback.answer()
@@ -418,7 +424,7 @@ async def choose_machine_for_date(callback: types.CallbackQuery):
     await _show_machines_for_date(callback.message, date)
 
 
-# Выбрали машину → выбираем ВРЕМЯ
+# Выбрали машину -> выбираем ВРЕМЯ
 @router.callback_query(F.data.startswith("machine_"))
 async def choose_hour(callback: types.CallbackQuery):
     await callback.answer()
@@ -557,7 +563,7 @@ async def finalize(callback: types.CallbackQuery):
     if not user or not (user[2] and user[3]):
         return await safe_edit(
             callback.message,
-            "Сначала завершите регистрацию: /start → фамилия и комната.",
+            "Сначала завершите регистрацию через /start: фамилия и комната.",
         )
 
     try:
@@ -582,7 +588,7 @@ async def finalize(callback: types.CallbackQuery):
             return await safe_edit(msg=callback.message, text="Ошибка: машина не найдена.")
         machine_type, machine_name = row
 
-    if get_user_bookings_today(user[0], date_str, machine_type):
+    if daily_limit_reached(user[0], date_str, machine_type):
         type_text = "стиральную машину" if machine_type == "wash" else "сушилку"
         return await safe_edit(
             msg=callback.message,
@@ -599,32 +605,21 @@ async def finalize(callback: types.CallbackQuery):
         )
 
     try:
-        create_booking(user[0], machine_id, date_str, hour)
-    except (IntegrityError, UniqueViolation):
-        # проверим, не ваша ли это запись
-        with get_conn() as conn:
-            mine = conn.execute(
-                """
-                SELECT 1
-                  FROM bookings
-                 WHERE user_id = ?
-                   AND machine_id = ?
-                   AND date =?
-                   AND hour =?
-                """,
-                (user[0], machine_id, date_str, hour),
-            ).fetchone()
-        if mine:
-            return await safe_edit(callback.message, "Вы уже записаны на этот слот.")
+        result = await create_booking_safe(user[0], machine_id, date_str, hour)
+    except DailyLimit:
         return await safe_edit(
             callback.message,
-            text="⚠️ Слот только что заняли. Выберите другое время ⏰",
-            parse_mode="HTML",
+            text="⚠️ У вас уже есть запись на этот тип машины в этот день.",
         )
-    except Exception:
-        # неожиданные ошибки — аккуратно сообщим
+    except (SlotBusy, InvalidBooking):
         return await safe_edit(
-            callback.message, text="Произошла ошибка сервера. Попробуйте ещё раз."
+            callback.message,
+            text="⚠️ Слот уже занят или временно зарезервирован. Выберите другое время ⏰",
+        )
+    except BookingError:
+        return await safe_edit(
+            callback.message,
+            text="Произошла ошибка сервера. Попробуйте ещё раз.",
         )
 
     icon = "🧺" if machine_type == "wash" else "🌬️"
@@ -634,7 +629,7 @@ async def finalize(callback: types.CallbackQuery):
             f"✅ Запись подтверждена!\n\n"
             f"📅 Дата: {date_str}\n"
             f"⏰ Время: {hour:02d}:00\n"
-            f"{icon} {machine_name}\n\n"
+            f"{icon} {result.machine_name}\n\n"
             f"Для отмены используйте /cancel"
         ),
         parse_mode="HTML",
@@ -658,14 +653,14 @@ async def finalize(callback: types.CallbackQuery):
         next_hour = hour + 1
         if next_hour <= max(WORKING_HOURS):
             # если ещё нет сушки в этот день
-            if not get_user_bookings_today(user[0], date_str, "dry"):
+            if not daily_limit_reached(user[0], date_str, "dry"):
                 with get_conn() as conn:
                     cur = conn.execute(
                         "SELECT id, name FROM machines WHERE type='dry' AND is_active ORDER BY id"
                     )
                     dryers = cur.fetchall()
                 for dry_id, dry_name in dryers:
-                    free = get_free_hours(dry_id, date_str)
+                    free = get_free_hours_effective(dry_id, date_str)
                     if next_hour in free:
                         text = (
                             "🌬️ Нужна сушка после стирки?\n\n"
@@ -717,7 +712,7 @@ async def auto_add_dryer(callback: types.CallbackQuery):
             callback.message, text="🚫 Вы заблокированы и не можете записываться."
         )
 
-    # проверим, что машина — сушилка и слот ещё свободен
+    # проверим, что машина - сушилка и слот ещё свободен
     with get_conn() as conn:
         row = conn.execute(
             "SELECT type, name FROM machines WHERE id=?", (dry_id,)
@@ -729,13 +724,13 @@ async def auto_add_dryer(callback: types.CallbackQuery):
         return await safe_edit(callback.message, text="Этот слот не для сушки.")
 
     # уже есть сушка в этот день?
-    if get_user_bookings_today(user[0], date_str, "dry"):
+    if daily_limit_reached(user[0], date_str, "dry"):
         return await safe_edit(
             callback.message,
             text="У вас уже есть запись на сушку в этот день.",
         )
 
-    free = get_free_hours(dry_id, date_str)
+    free = get_free_hours_effective(dry_id, date_str)
     if hour not in free:
         return await safe_edit(
             callback.message,
@@ -743,15 +738,11 @@ async def auto_add_dryer(callback: types.CallbackQuery):
         )
 
     try:
-        create_booking(user[0], dry_id, date_str, hour)
-    except (IntegrityError, UniqueViolation):
+        result = await create_booking_safe(user[0], dry_id, date_str, hour)
+    except BookingError:
         return await safe_edit(
             callback.message,
             text="К сожалению, этот слот сушки уже заняли. Выберите другой вручную через /book.",
-        )
-    except Exception:
-        return await safe_edit(
-            callback.message, text="Произошла ошибка при добавлении сушки."
         )
 
     # текст подтверждения
@@ -835,9 +826,13 @@ async def show_user_bookings(msg: types.Message):
 async def cancel_booking(callback: types.CallbackQuery):
     await callback.answer()  # ← быстрый ACK
     booking_id = int(callback.data.split("_")[1])
-    with get_conn() as conn:
-        conn.execute("DELETE FROM bookings WHERE id=?", (booking_id,))
+    try:
+        old = await cancel_booking_safe(booking_id)
+    except InvalidBooking as exc:
+        return await safe_edit(msg=callback.message, text=str(exc))
     await safe_edit(msg=callback.message, text="🗑️ Запись отменена.")
+    from waitlist_service import distribute_date
+    await distribute_date(old.date, context="day")
 
 
 # --- Мои записи: только будущие ---
@@ -876,7 +871,7 @@ async def show_future_bookings(msg: types.Message):
             if hasattr(date_val, "strftime")
             else datetime.fromisoformat(str(date_val)).strftime("%d.%m.%Y")
         )
-        text += f"📅 {ds} — {hour:02d}:00\n• {name}\n\n"
+        text += f"📅 {ds} - {hour:02d}:00\n• {name}\n\n"
     await msg.answer(text, parse_mode="HTML")
 
 
@@ -901,12 +896,12 @@ async def btn_cancel(msg: types.Message):
 async def show_help(msg: types.Message):
     help_text = (
         "ℹ️ <b>Помощь по использованию бота</b>\n\n"
-        "🧺 <b>Запись</b> – выберите дату → машину → время.\n"
-        "📋 <b>Мои записи</b> – покажет все ваши активные записи.\n"
-        "❌ <b>Отменить запись</b> – удалит вашу текущую бронь.\n\n"
-        "⏰ Запись доступна с 9:00 до 23:00, не более одного слота в день.\n"
-        "📅 Можно записаться максимум на 2 дня вперёд (сегодня, завтра, послезавтра).\n\n"
-        "Если есть вопросы и предложения – пишите @ilyinmax."
+        "🧺 <b>Запись</b> - выберите дату -> машину -> время.\n"
+        "📋 <b>Мои записи</b> - покажет все ваши активные записи.\n"
+        "❌ <b>Отменить запись</b> - удалит вашу текущую бронь.\n\n"
+        "⏰ Запись доступна с 07:00 до 23:00, не более одного слота на каждый тип машины в день.\n"
+        "📅 Доступны сегодня, завтра и послезавтра. Новый день открывается в 00:00.\n\n"
+        "Если есть вопросы и предложения - пишите @ilyinmax."
     )
     await msg.answer(help_text, parse_mode="HTML")
 
