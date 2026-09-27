@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -48,6 +48,7 @@ class Request:
     priority_since: datetime
     intervals: list[tuple[int, int]]
     machines: set[int]
+    weekdays: set[int] = field(default_factory=set)
     usage_points: int = 0
 
     def accepts_hour(self, hour: int) -> bool:
@@ -55,6 +56,11 @@ class Request:
 
     def accepts_machine(self, machine_id: int) -> bool:
         return self.any_machine or machine_id in self.machines
+
+    def accepts_date(self, date_iso: str) -> bool:
+        if not self.weekdays:
+            return True
+        return datetime.fromisoformat(str(date_iso)).date().weekday() in self.weekdays
 
     def queue_score(self, now: datetime) -> int:
         waiting = min(168, max(0, int((now - self.priority_since).total_seconds() // 3600)))
@@ -215,6 +221,7 @@ def save_request(
     machine_ids: list[int],
     any_machine: bool,
     mode: str,
+    weekdays: list[int] | None = None,
 ) -> int:
     now = datetime.now(TZ)
     if mode not in {"auto", "notify"}:
@@ -229,6 +236,10 @@ def save_request(
             normalized.append((start, end))
     if not normalized or len(normalized) > 3:
         raise ValueError("Нужно выбрать от 1 до 3 интервалов")
+
+    normalized_weekdays = sorted({int(x) for x in (weekdays or [])})
+    if any(day < 0 or day > 6 for day in normalized_weekdays):
+        raise ValueError("Некорректный день недели")
 
     with get_conn() as conn:
         user = conn.execute(
@@ -261,11 +272,20 @@ def save_request(
                     (request_id,),
                 ).fetchall()
             }
+            old_weekdays = {
+                int(r[0])
+                for r in conn.execute(
+                    "SELECT weekday FROM waitlist_weekdays WHERE request_id=?",
+                    (request_id,),
+                ).fetchall()
+            }
             new_machines = set() if any_machine else {int(x) for x in machine_ids}
+            new_weekdays = set(normalized_weekdays)
             conditions_changed = (
                 old_intervals != normalized
                 or bool(old[2]) != bool(any_machine)
                 or old_machines != new_machines
+                or old_weekdays != new_weekdays
             )
             priority_since = now_s if conditions_changed else str(old[3])
             conn.execute(
@@ -286,6 +306,7 @@ def save_request(
             )
             conn.execute("DELETE FROM waitlist_intervals WHERE request_id=?", (request_id,))
             conn.execute("DELETE FROM waitlist_machines WHERE request_id=?", (request_id,))
+            conn.execute("DELETE FROM waitlist_weekdays WHERE request_id=?", (request_id,))
         else:
             cur = conn.execute(
                 """
@@ -313,6 +334,11 @@ def save_request(
                     "INSERT INTO waitlist_machines(request_id,machine_id) VALUES (?,?) ON CONFLICT DO NOTHING",
                     (request_id, mid),
                 )
+        for weekday in normalized_weekdays:
+            conn.execute(
+                "INSERT INTO waitlist_weekdays(request_id,weekday) VALUES (?,?) ON CONFLICT DO NOTHING",
+                (request_id, int(weekday)),
+            )
     if old:
         for (hold_id,) in hold_rows:
             _cancel_hold_expiry(int(hold_id))
@@ -348,6 +374,9 @@ def _active_requests(cutoff_at: str | None = None) -> list[Request]:
         machine_rows = conn.execute(
             "SELECT request_id,machine_id FROM waitlist_machines"
         ).fetchall()
+        weekday_rows = conn.execute(
+            "SELECT request_id,weekday FROM waitlist_weekdays"
+        ).fetchall()
 
     intervals: dict[int, list[tuple[int, int]]] = {}
     for rid, start, end in interval_rows:
@@ -355,6 +384,9 @@ def _active_requests(cutoff_at: str | None = None) -> list[Request]:
     machines: dict[int, set[int]] = {}
     for rid, mid in machine_rows:
         machines.setdefault(int(rid), set()).add(int(mid))
+    weekdays: dict[int, set[int]] = {}
+    for rid, weekday in weekday_rows:
+        weekdays.setdefault(int(rid), set()).add(int(weekday))
 
     result = []
     for rid, uid, tg, mode, any_machine, priority_since in rows:
@@ -366,6 +398,7 @@ def _active_requests(cutoff_at: str | None = None) -> list[Request]:
             int(rid), int(uid), int(tg), str(mode), bool(any_machine),
             _dt(priority_since), intervals.get(int(rid), []),
             machines.get(int(rid), set()),
+            weekdays.get(int(rid), set()),
         ))
     penalties = usage_penalties_for_users([x.user_id for x in result])
     for req in result:
@@ -635,7 +668,10 @@ async def _distribute_date_locked(date_iso: str, *, context: str = "day") -> int
             (str(date_iso), recent_cutoff),
         ).fetchall()
     recent_requests = {int(r[0]) for r in recent_rows if r[0] is not None}
-    requests = [r for r in requests if r.id not in recent_requests]
+    requests = [
+        r for r in requests
+        if r.id not in recent_requests and r.accepts_date(date_iso)
+    ]
     slots = _free_slots(date_iso)
     if not slots:
         return 0
@@ -951,6 +987,9 @@ async def offer_earlier_for_date(date_iso: str) -> int:
         machine_rows = conn.execute(
             "SELECT request_id,machine_id FROM waitlist_machines"
         ).fetchall()
+        weekday_rows = conn.execute(
+            "SELECT request_id,weekday FROM waitlist_weekdays"
+        ).fetchall()
 
     intervals = {}
     for rid, a, b in interval_rows:
@@ -958,6 +997,9 @@ async def offer_earlier_for_date(date_iso: str) -> int:
     machines = {}
     for rid, mid in machine_rows:
         machines.setdefault(int(rid), set()).add(int(mid))
+    weekdays = {}
+    for rid, weekday in weekday_rows:
+        weekdays.setdefault(int(rid), set()).add(int(weekday))
 
     recent_cutoff = (datetime.now(TZ) - timedelta(minutes=10)).isoformat(timespec="seconds")
     with get_conn() as conn:
@@ -978,11 +1020,15 @@ async def offer_earlier_for_date(date_iso: str) -> int:
             continue
         if active_hold_for_user(int(uid)):
             continue
-        candidates.append(Request(
+        candidate = Request(
             int(rid), int(uid), int(tg), "notify", bool(any_machine),
             _dt(priority_since), intervals.get(int(rid), []),
             machines.get(int(rid), set()),
-        ))
+            weekdays.get(int(rid), set()),
+        )
+        if not candidate.accepts_date(date_iso):
+            continue
+        candidates.append(candidate)
         candidates[-1].current_booking_id = int(booking_id)
 
     penalties = usage_penalties_for_users([c.user_id for c in candidates])
