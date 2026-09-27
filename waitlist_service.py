@@ -192,6 +192,10 @@ def cancel_request_for_tg(tg_id: int) -> bool:
         ).fetchone()
         if not row:
             return False
+        hold_rows = conn.execute(
+            "SELECT id FROM slot_holds WHERE request_id=? AND status='active'",
+            (int(row[0]),),
+        ).fetchall()
         conn.execute(
             "UPDATE waitlist_requests SET status='cancelled',updated_at=? WHERE id=?",
             (now, int(row[0])),
@@ -200,6 +204,8 @@ def cancel_request_for_tg(tg_id: int) -> bool:
             "UPDATE slot_holds SET status='cancelled' WHERE request_id=? AND status='active'",
             (int(row[0]),),
         )
+    for (hold_id,) in hold_rows:
+        _cancel_hold_expiry(int(hold_id))
     return True
 
 
@@ -270,6 +276,10 @@ def save_request(
                 """,
                 (mode, int(bool(any_machine)), priority_since, now_s, request_id),
             )
+            hold_rows = conn.execute(
+                "SELECT id FROM slot_holds WHERE request_id=? AND status='active'",
+                (request_id,),
+            ).fetchall()
             conn.execute(
                 "UPDATE slot_holds SET status='cancelled' WHERE request_id=? AND status='active'",
                 (request_id,),
@@ -303,6 +313,9 @@ def save_request(
                     "INSERT INTO waitlist_machines(request_id,machine_id) VALUES (?,?) ON CONFLICT DO NOTHING",
                     (request_id, mid),
                 )
+    if old:
+        for (hold_id,) in hold_rows:
+            _cancel_hold_expiry(int(hold_id))
     return int(request_id)
 
 
