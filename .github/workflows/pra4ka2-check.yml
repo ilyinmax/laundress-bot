@@ -2,7 +2,7 @@ name: PRA4KA 2.0 checks
 
 on:
   push:
-    branches: [ "pra4ka-2.0" ]
+    branches: [ "pra4ka-2.0", "pra4ka-2.0-dryer-flow" ]
   workflow_dispatch:
 
 jobs:
