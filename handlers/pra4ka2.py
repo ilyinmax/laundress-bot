@@ -4,6 +4,7 @@ from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from aiogram import Router, F, types
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -19,6 +20,7 @@ from database import (
 )
 from keyboards import build_main_menu, reply_menu
 from booking_service import create_booking_safe, DailyLimit, SlotBusy, InvalidBooking
+from dryer_service import has_wash_booking, find_next_dryer
 from waitlist_service import (
     get_active_request_for_tg,
     cancel_request_for_tg,
@@ -183,7 +185,11 @@ async def choose_date(msg: types.Message, state: FSMContext):
 
     lines = [f"📅 <b>{date_text(date_iso)}</b>", ""]
     machine_map = {}
+    user = get_user(msg.from_user.id)
+    wash_exists = bool(user and has_wash_booking(int(user[0]), date_iso))
     for mid, mtype, name in machines:
+        if str(mtype) == "dry" and not wash_exists:
+            continue
         hours = get_free_hours_effective(int(mid), date_iso)
         if date_iso == now.date().isoformat():
             hours = [h for h in hours if h > now.hour]
@@ -287,6 +293,27 @@ async def choose_hour(msg: types.Message, state: FSMContext):
         parse_mode="HTML",
         reply_markup=main_kb(msg.from_user.id),
     )
+
+    if result.machine_type == "wash":
+        offer = find_next_dryer(result.user_id, result.date, result.hour)
+        if offer:
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="✅ Да, добавить сушку",
+                    callback_data=f"auto_dry_{offer.machine_id}_{offer.date}_{offer.hour}",
+                ),
+                InlineKeyboardButton(
+                    text="❌ Нет, не добавлять",
+                    callback_data="auto_dry_cancel",
+                ),
+            ]])
+            await msg.answer(
+                "🌬️ <b>Нужна сушка после стирки?</b>\n\n"
+                f"Свободна <b>{offer.machine_name}</b>\n"
+                f"сразу после вашей стирки, в {offer.hour:02d}:00.",
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
 
 
 def future_bookings(tg_id: int):
@@ -746,7 +773,9 @@ HELP_TEXTS = {
         "📋 Мои записи\nПоказывает ваши предстоящие записи.\n\n"
         "❌ Отменить запись\nВыберите запись, которую хотите отменить.\n\n"
         "🔔 Лист ожидания\nМожно заранее указать удобное время и машинки, а бот сам будет искать подходящее свободное место.\n\n"
-        "📅 Новая дата для обычной записи открывается каждый день в 00:00.",
+        "🌬️ Сушка\nСначала нужно записаться на стиральную машину. После записи бот предложит свободную сушилку на следующий час, если она есть. После этого сушилку также можно выбрать вручную.\n\n"
+        "📅 Новая дата для обычной записи открывается каждый день в 00:00.\n\n"
+        "🐞 Если заметили ошибку или что-то работает странно, напишите <b>@ilyinmax</b>.",
 
     "🤯 Что нового в PRA4KA 2.0":
         "🤯 <b>Что нового в PRA4KA 2.0</b>\n\n"
@@ -818,6 +847,26 @@ async def waitlist_accept_callback(callback: types.CallbackQuery, state: FSMCont
         parse_mode="HTML",
         reply_markup=main_kb(callback.from_user.id),
     )
+    if result.machine_type == "wash":
+        offer = find_next_dryer(result.user_id, result.date, result.hour)
+        if offer:
+            kb = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="✅ Да, добавить сушку",
+                    callback_data=f"auto_dry_{offer.machine_id}_{offer.date}_{offer.hour}",
+                ),
+                InlineKeyboardButton(
+                    text="❌ Нет, не добавлять",
+                    callback_data="auto_dry_cancel",
+                ),
+            ]])
+            await callback.message.answer(
+                "🌬️ <b>Нужна сушка после стирки?</b>\n\n"
+                f"Свободна <b>{offer.machine_name}</b>\n"
+                f"сразу после вашей стирки, в {offer.hour:02d}:00.",
+                parse_mode="HTML",
+                reply_markup=kb,
+            )
 
 
 @router.callback_query(F.data.startswith("wl_decline_"))

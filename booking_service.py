@@ -134,6 +134,22 @@ def _insert_booking(
     if not active:
         raise InvalidBooking("Машина сейчас недоступна")
 
+    if str(mtype) == "dry" and not is_admin(int(user[0])):
+        wash = conn.execute(
+            """
+            SELECT 1
+            FROM bookings b
+            JOIN machines m ON m.id=b.machine_id
+            WHERE b.user_id=? AND b.date=? AND m.type='wash'
+            LIMIT 1
+            """,
+            (int(user_id), str(date_iso)),
+        ).fetchone()
+        if not wash:
+            raise InvalidBooking(
+                "Сначала нужно записаться на стиральную машину в этот день"
+            )
+
     if DATABASE_URL:
         lock_key = f"booking:{int(user_id)}:{str(date_iso)}:{str(mtype)}"
         conn.execute("SELECT pg_advisory_xact_lock(hashtext(?))", (lock_key,))

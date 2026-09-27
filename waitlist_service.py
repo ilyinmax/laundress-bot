@@ -20,6 +20,7 @@ from database import (
     is_banned,
 )
 from booking_service import create_booking_safe, BookingError
+from dryer_service import find_next_dryer
 from keyboards import build_main_menu
 
 TZ = ZoneInfo(TIMEZONE)
@@ -319,6 +320,36 @@ def _quiet_for(user_id: int) -> bool:
     return h >= start or h < end if start > end else start <= h < end
 
 
+async def _send_dryer_offer(tg_id: int, result) -> None:
+    if BOT is None or result.machine_type != "wash":
+        return
+    offer = find_next_dryer(result.user_id, result.date, result.hour)
+    if not offer:
+        return
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text="✅ Да, добавить сушку",
+            callback_data=f"auto_dry_{offer.machine_id}_{offer.date}_{offer.hour}",
+        ),
+        InlineKeyboardButton(
+            text="❌ Нет, не добавлять",
+            callback_data="auto_dry_cancel",
+        ),
+    ]])
+    try:
+        await BOT.send_message(
+            int(tg_id),
+            "🌬️ <b>Нужна сушка после стирки?</b>\n\n"
+            f"Свободна <b>{offer.machine_name}</b>\n"
+            f"сразу после вашей стирки, в {offer.hour:02d}:00.",
+            parse_mode="HTML",
+            reply_markup=kb,
+            disable_notification=_quiet_for(result.user_id),
+        )
+    except Exception:
+        pass
+
+
 async def _schedule_booking_features(result) -> None:
     with get_conn() as conn:
         tg = conn.execute("SELECT tg_id FROM users WHERE id=?", (result.user_id,)).fetchone()
@@ -364,6 +395,7 @@ async def _send_auto_confirmation(req: Request, result, *, night: bool) -> None:
             disable_notification=_quiet_for(req.user_id),
             reply_markup=build_main_menu(False),
         )
+        await _send_dryer_offer(req.tg_id, result)
     except Exception:
         pass
 
@@ -602,6 +634,30 @@ async def send_pending_notifications() -> int:
             continue
         with get_conn() as conn:
             conn.execute("UPDATE pending_waitlist_notifications SET sent=1 WHERE id=?", (int(pid),))
+            booking = (
+                conn.execute(
+                    """
+                    SELECT b.id,b.user_id,b.machine_id,m.type,m.name,b.date,b.hour
+                    FROM bookings b
+                    JOIN machines m ON m.id=b.machine_id
+                    WHERE b.id=?
+                    """,
+                    (booking_id,),
+                ).fetchone()
+                if booking_id else None
+            )
+        if booking:
+            class _BookingResult:
+                pass
+            result = _BookingResult()
+            result.booking_id = int(booking[0])
+            result.user_id = int(booking[1])
+            result.machine_id = int(booking[2])
+            result.machine_type = str(booking[3])
+            result.machine_name = str(booking[4])
+            result.date = booking[5].isoformat() if hasattr(booking[5], "isoformat") else str(booking[5])
+            result.hour = int(booking[6])
+            await _send_dryer_offer(int(tg), result)
         sent += 1
         await asyncio.sleep(0.04)
     return sent
