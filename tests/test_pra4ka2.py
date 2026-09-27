@@ -341,5 +341,57 @@ class Pra4ka2Tests(unittest.TestCase):
         ))
 
 
+    def test_cancelling_future_waitlist_booking_reopens_same_request_with_priority(self):
+        import booking_service as bs
+        import waitlist_service as wl
+
+        future = (datetime.now(TZ).date() + timedelta(days=1)).isoformat()
+        uid = self.uid(1001)
+        mid = self.mid("Стиральная №1")
+
+        request_id = wl.save_request(1001, [(10, 12)], [mid], False, "auto")
+        old_priority = "2026-09-20T12:00:00+03:00"
+        with database.get_conn() as conn:
+            conn.execute(
+                "UPDATE waitlist_requests SET priority_since=? WHERE id=?",
+                (old_priority, request_id),
+            )
+
+        booking = asyncio.run(bs.create_booking_safe(uid, mid, future, 10))
+        with database.get_conn() as conn:
+            matched = conn.execute(
+                "SELECT status,matched_booking_id,priority_since FROM waitlist_requests WHERE id=?",
+                (request_id,),
+            ).fetchone()
+        self.assertEqual(str(matched[0]), "matched")
+        self.assertEqual(int(matched[1]), booking.booking_id)
+        self.assertEqual(str(matched[2]), old_priority)
+
+        cancelled = asyncio.run(bs.cancel_booking_safe(booking.booking_id))
+        self.assertTrue(cancelled.waitlist_reopened)
+
+        with database.get_conn() as conn:
+            reopened = conn.execute(
+                "SELECT status,matched_booking_id,priority_since FROM waitlist_requests WHERE id=?",
+                (request_id,),
+            ).fetchone()
+            history = conn.execute(
+                """
+                SELECT result FROM waitlist_offer_history
+                WHERE request_id=? AND machine_id=? AND date=? AND hour=?
+                ORDER BY id DESC LIMIT 1
+                """,
+                (request_id, mid, future, 10),
+            ).fetchone()
+
+        self.assertEqual(str(reopened[0]), "active")
+        self.assertIsNone(reopened[1])
+        self.assertEqual(str(reopened[2]), old_priority)
+        self.assertEqual(str(history[0]), "cancelled_booking")
+        self.assertFalse(
+            database.usage_penalties_for_users([uid]).get(uid, 0)
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
