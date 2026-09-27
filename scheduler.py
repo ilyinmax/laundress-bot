@@ -51,13 +51,7 @@ def setup_scheduler():
             id="cleanup_daily",
             replace_existing=True,
         )
-        from database import record_usage_history
-        from waitlist_service import (
-            process_night_round,
-            expire_holds,
-            send_pending_notifications,
-            check_active_waitlist,
-        )
+        from waitlist_service import process_night_round
         scheduler.add_job(
             process_night_round,
             trigger="cron",
@@ -66,38 +60,6 @@ def setup_scheduler():
             id="waitlist_night_round",
             replace_existing=True,
             misfire_grace_time=3600,
-        )
-        scheduler.add_job(
-            expire_holds,
-            trigger="interval",
-            seconds=20,
-            id="waitlist_expire_holds",
-            replace_existing=True,
-            misfire_grace_time=60,
-        )
-        scheduler.add_job(
-            send_pending_notifications,
-            trigger="interval",
-            seconds=20,
-            id="waitlist_pending_notifications",
-            replace_existing=True,
-            misfire_grace_time=60,
-        )
-        scheduler.add_job(
-            check_active_waitlist,
-            trigger="interval",
-            minutes=1,
-            id="waitlist_active_poll",
-            replace_existing=True,
-            misfire_grace_time=60,
-        )
-        scheduler.add_job(
-            record_usage_history,
-            trigger="interval",
-            minutes=10,
-            id="usage_history_tick",
-            replace_existing=True,
-            misfire_grace_time=600,
         )
         # сторож: каждую минуту проверяем, не пришло ли время напоминания
         '''
