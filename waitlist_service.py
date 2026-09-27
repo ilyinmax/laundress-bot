@@ -18,6 +18,7 @@ from database import (
     get_free_hours_effective,
     active_hold_for_user,
     is_banned,
+    record_usage_history,
 )
 from booking_service import create_booking_safe, BookingError
 from dryer_service import find_next_dryer
@@ -68,6 +69,99 @@ def attach_bot(bot: Bot) -> None:
 def _dt(value) -> datetime:
     dt = datetime.fromisoformat(str(value))
     return dt if dt.tzinfo else dt.replace(tzinfo=TZ)
+
+
+
+def _remove_job(job_id: str) -> None:
+    try:
+        from scheduler import scheduler
+        scheduler.remove_job(job_id)
+    except Exception:
+        pass
+
+
+def _schedule_hold_expiry(hold_id: int, expires_at) -> None:
+    """One in-memory job per HOLD. No database polling is required."""
+    from apscheduler.triggers.date import DateTrigger
+    from scheduler import scheduler
+
+    run_at = _dt(expires_at)
+    now = datetime.now(TZ)
+    if run_at <= now:
+        run_at = now + timedelta(seconds=1)
+
+    scheduler.add_job(
+        expire_hold,
+        trigger=DateTrigger(run_date=run_at),
+        id=f"waitlist_hold_{int(hold_id)}",
+        args=[int(hold_id)],
+        replace_existing=True,
+        misfire_grace_time=300,
+    )
+
+
+def _cancel_hold_expiry(hold_id: int) -> None:
+    _remove_job(f"waitlist_hold_{int(hold_id)}")
+
+
+def schedule_next_pending_notification() -> None:
+    """Schedule one exact wake-up for the earliest unsent midnight notification."""
+    from apscheduler.triggers.date import DateTrigger
+    from scheduler import scheduler
+
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT MIN(send_at)
+            FROM pending_waitlist_notifications
+            WHERE sent=0
+            """
+        ).fetchone()
+
+    if not row or not row[0]:
+        _remove_job("waitlist_pending_notifications_once")
+        return
+
+    run_at = _dt(row[0])
+    now = datetime.now(TZ)
+    if run_at <= now:
+        run_at = now + timedelta(seconds=1)
+
+    scheduler.add_job(
+        send_pending_notifications,
+        trigger=DateTrigger(run_date=run_at),
+        id="waitlist_pending_notifications_once",
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+
+async def rebuild_waitlist_jobs() -> None:
+    """
+    One-time recovery after a Render restart.
+
+    Rebuild exact HOLD expiration jobs and the next deferred notification,
+    then run one waitlist consistency check. Nothing here polls Neon.
+    """
+    now = datetime.now(TZ)
+    with get_conn() as conn:
+        holds = conn.execute(
+            """
+            SELECT id,expires_at
+            FROM slot_holds
+            WHERE status='active'
+            ORDER BY expires_at
+            """
+        ).fetchall()
+
+    for hold_id, expires_at in holds:
+        if _dt(expires_at) <= now:
+            await expire_hold(int(hold_id))
+        else:
+            _schedule_hold_expiry(int(hold_id), expires_at)
+
+    schedule_next_pending_notification()
+    await check_active_waitlist()
 
 
 def get_active_request_for_tg(tg_id: int):
@@ -491,6 +585,7 @@ async def _create_hold(req: Request, machine_id: int, date_iso: str, hour: int, 
             req.tg_id, text, parse_mode="HTML", reply_markup=kb,
             disable_notification=_quiet_for(req.user_id),
         )
+        _schedule_hold_expiry(int(hold_id), expires)
         await asyncio.sleep(0.04)
     except Exception:
         with get_conn() as conn:
@@ -505,6 +600,8 @@ async def distribute_date(date_iso: str, *, context: str = "day") -> int:
 
 
 async def _distribute_date_locked(date_iso: str, *, context: str = "day") -> int:
+    # Keep 30-day fairness data current only when matching is actually needed.
+    record_usage_history()
     cutoff_at = None
     if context == "night":
         with get_conn() as conn:
@@ -574,47 +671,77 @@ async def process_night_round() -> None:
             "UPDATE waitlist_rounds SET status='finished',finished_at=? WHERE target_date=?",
             (datetime.now(TZ).isoformat(timespec="seconds"), target),
         )
+    schedule_next_pending_notification()
+
+
+async def expire_hold(hold_id: int) -> bool:
+    """Expire one HOLD at its exact deadline and redistribute its slot."""
+    row = get_hold(int(hold_id))
+    if not row or str(row[11]) != "active":
+        _cancel_hold_expiry(int(hold_id))
+        return False
+
+    now = datetime.now(TZ)
+    expires_at = _dt(row[8])
+    if expires_at > now:
+        _schedule_hold_expiry(int(hold_id), expires_at)
+        return False
+
+    request_id = row[1]
+    machine_id = int(row[4])
+    date_iso = str(row[6])
+    hour = int(row[7])
+    context = str(row[9])
+
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE slot_holds SET status='expired' WHERE id=? AND status='active'",
+            (int(hold_id),),
+        )
+        if request_id:
+            conn.execute(
+                """
+                INSERT INTO waitlist_offer_history
+                (request_id,machine_id,date,hour,result,created_at)
+                VALUES (?,?,?,?,?,?)
+                """,
+                (
+                    int(request_id), machine_id, date_iso, hour, "expired",
+                    now.isoformat(timespec="seconds"),
+                ),
+            )
+
+    _cancel_hold_expiry(int(hold_id))
+
+    # Night priority is not restarted after midnight. Day/move slots can be
+    # redistributed immediately because their HOLD has just disappeared.
+    if context == "night":
+        if now.hour == 23:
+            await distribute_date(date_iso, context="night")
+    elif context in {"day", "move"}:
+        await distribute_date(date_iso, context="day")
+
+    return True
 
 
 async def expire_holds() -> int:
-    now = datetime.now(TZ)
+    """Recovery-only batch helper; no longer scheduled periodically."""
+    now_s = datetime.now(TZ).isoformat(timespec="seconds")
     with get_conn() as conn:
         rows = conn.execute(
             """
-            SELECT id,date,context FROM slot_holds
+            SELECT id FROM slot_holds
             WHERE status='active' AND expires_at<=?
+            ORDER BY expires_at
             """,
-            (now.isoformat(timespec="seconds"),),
+            (now_s,),
         ).fetchall()
-        for hold_id, _, _ in rows:
-            conn.execute(
-                "UPDATE slot_holds SET status='expired' WHERE id=?",
-                (int(hold_id),),
-            )
-            h = conn.execute(
-                "SELECT request_id,machine_id,date,hour FROM slot_holds WHERE id=?",
-                (int(hold_id),),
-            ).fetchone()
-            if h and h[0]:
-                conn.execute(
-                    """
-                    INSERT INTO waitlist_offer_history(request_id,machine_id,date,hour,result,created_at)
-                    VALUES (?,?,?,?,?,?)
-                    """,
-                    (
-                        int(h[0]), int(h[1]), str(h[2]), int(h[3]), "expired",
-                        now.isoformat(timespec="seconds"),
-                    ),
-                )
-    rerun = set()
-    for _, date_iso, context in rows:
-        if context == "night" and now.hour == 23:
-            rerun.add(str(date_iso))
-        elif context == "day":
-            rerun.add(str(date_iso))
-    for date_iso in rerun:
-        await distribute_date(date_iso, context="night" if now.hour == 23 else "day")
-    return len(rows)
+
+    expired = 0
+    for (hold_id,) in rows:
+        if await expire_hold(int(hold_id)):
+            expired += 1
+    return expired
 
 
 async def send_pending_notifications() -> int:
@@ -694,6 +821,7 @@ async def send_pending_notifications() -> int:
             await _send_dryer_offer(int(tg), result)
         sent += 1
         await asyncio.sleep(0.04)
+    schedule_next_pending_notification()
     return sent
 
 
@@ -729,9 +857,10 @@ async def decline_hold(hold_id: int, tg_id: int) -> bool:
                     "declined", datetime.now(TZ).isoformat(timespec="seconds"),
                 ),
             )
+    _cancel_hold_expiry(int(hold_id))
     if str(row[9]) == "night" and datetime.now(TZ).hour == 23:
         await distribute_date(str(row[6]), context="night")
-    elif str(row[9]) == "day":
+    elif str(row[9]) in {"day", "move"}:
         await distribute_date(str(row[6]), context="day")
     return True
 
@@ -745,6 +874,7 @@ async def accept_hold(hold_id: int, tg_id: int):
             conn.execute("UPDATE slot_holds SET status='cancelled' WHERE id=?", (int(hold_id),))
         return None
     if _dt(row[8]) <= datetime.now(TZ):
+        await expire_hold(int(hold_id))
         return None
 
     from booking_service import move_booking_safe
@@ -763,6 +893,7 @@ async def accept_hold(hold_id: int, tg_id: int):
                     int(row[1]),
                 ),
             )
+        _cancel_hold_expiry(int(hold_id))
         await distribute_date(old.date, context="day")
         return new
 
@@ -773,6 +904,7 @@ async def accept_hold(hold_id: int, tg_id: int):
         )
     except BookingError:
         return None
+    _cancel_hold_expiry(int(hold_id))
     await _schedule_booking_features(result)
     return result
 
@@ -926,6 +1058,7 @@ async def _create_move_hold(
             req.tg_id, text, parse_mode="HTML", reply_markup=kb,
             disable_notification=_quiet_for(req.user_id),
         )
+        _schedule_hold_expiry(int(hold_id), expires)
     except Exception:
         with get_conn() as conn:
             conn.execute("UPDATE slot_holds SET status='expired' WHERE id=?", (int(hold_id),))
