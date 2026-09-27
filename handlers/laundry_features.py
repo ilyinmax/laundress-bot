@@ -19,7 +19,7 @@ from scheduler import scheduler
 TZ = ZoneInfo(TIMEZONE)
 router = Router()
 BOT: Bot | None = None
-MIN_T, MAX_T, CARD_BEFORE, PICK_BEFORE, COOLDOWN, PAGE = 30, 60, 5, 2, 5, 10
+MIN_T, MAX_T, CARD_BEFORE, PICK_BEFORE, COOLDOWN = 30, 60, 5, 2, 5
 
 class TimerInput(StatesGroup):
     minutes = State()
@@ -297,31 +297,76 @@ async def foreign(cb:types.CallbackQuery):
     with get_conn() as c: c.execute("INSERT INTO foreign_nudges(previous_booking_id,last_sent_at) VALUES(?,?) ON CONFLICT(previous_booking_id) DO UPDATE SET last_sent_at=excluded.last_sent_at",(prev,now.isoformat()))
     await cb.answer("Предыдущему пользователю отправлено уведомление ✅",show_alert=True)
 
-def users_kb(page,total):
-    mp=max(0,(total-1)//PAGE); nav=[]
-    if page>0: nav.append(B(text="‹",callback_data=f"lf_users_{page-1}"))
-    nav.append(B(text=f"{page+1}/{mp+1}",callback_data="lf_users_noop"))
-    if page<mp: nav.append(B(text="›",callback_data=f"lf_users_{page+1}"))
-    return K(inline_keyboard=[nav,[B(text="⬅️ В админку",callback_data="admin_extra_home")]])
+def _user_pages(rows, max_chars: int = 3600):
+    pages = []
+    current = []
+    current_len = 0
+    for i,(tg,su,ro,un) in enumerate(rows,start=1):
+        surname = html.escape(str(_b64d_try(su) or "-"))
+        room = html.escape(str(_b64d_try(ro) or "-"))
+        uname = f"@{html.escape(str(un))}" if un else "без username"
+        line = f"<b>{i}. {surname}</b> · комн. {room} · {uname}"
+        extra = len(line) + 1
+        if current and current_len + extra > max_chars:
+            pages.append(current)
+            current = []
+            current_len = 0
+        current.append(line)
+        current_len += extra
+    if current or not pages:
+        pages.append(current)
+    return pages
+
+
+def users_kb(page: int, pages: int):
+    pages = max(1, int(pages))
+    page = min(max(0, int(page)), pages - 1)
+    nav = []
+    if page > 0:
+        nav.append(B(text="‹",callback_data=f"lf_users_{page-1}"))
+    nav.append(B(text=f"{page+1}/{pages}",callback_data="lf_users_noop"))
+    if page + 1 < pages:
+        nav.append(B(text="›",callback_data=f"lf_users_{page+1}"))
+    return K(inline_keyboard=[
+        nav,
+        [B(text="⬅️ В админку",callback_data="admin_extra_home")],
+    ])
+
 
 @router.callback_query(F.data=="lf_users_noop")
-async def users_noop(cb): await cb.answer()
+async def users_noop(cb):
+    await cb.answer()
+
 
 @router.callback_query(F.data.startswith("lf_users_"))
 async def users(cb:types.CallbackQuery):
-    if not is_admin(cb.from_user.id): return await cb.answer("🚫 Нет доступа.",show_alert=True)
-    try: page=max(0,int(cb.data.removeprefix("lf_users_")))
-    except Exception: page=0
+    if not is_admin(cb.from_user.id):
+        return await cb.answer("🚫 Нет доступа.",show_alert=True)
+    try:
+        page=max(0,int(cb.data.removeprefix("lf_users_")))
+    except Exception:
+        page=0
+
     with get_conn() as c:
-        total=int(c.execute("SELECT COUNT(*) FROM users").fetchone()[0]); mp=max(0,(total-1)//PAGE); page=min(page,mp)
-        rows=c.execute("SELECT tg_id,surname,room,username FROM users ORDER BY id LIMIT ? OFFSET ?",(PAGE,page*PAGE)).fetchall()
-    lines=[f"👥 <b>Пользователи бота</b> - {total}"]
-    for i,(tg,su,ro,un) in enumerate(rows,start=page*PAGE+1):
-        surname,room=html.escape(str(_b64d_try(su) or "-")),html.escape(str(_b64d_try(ro) or "-")); uname=f"@{html.escape(str(un))}" if un else "без username"
-        lines.append(f"<b>{i}. {surname}</b> · комн. {room}\n{uname} · <code>{int(tg)}</code>")
+        rows=c.execute(
+            "SELECT tg_id,surname,room,username FROM users ORDER BY id"
+        ).fetchall()
+
+    pages = _user_pages(rows)
+    page = min(page, len(pages)-1)
+    lines = [f"👥 <b>Пользователи бота: {len(rows)}</b>", ""]
+    lines.extend(pages[page])
+
     await cb.answer()
-    try: await cb.message.edit_text("\n\n".join(lines),parse_mode="HTML",reply_markup=users_kb(page,total))
-    except TelegramBadRequest: pass
+    try:
+        await cb.message.edit_text(
+            "\n".join(lines),
+            parse_mode="HTML",
+            reply_markup=users_kb(page,len(pages)),
+        )
+    except TelegramBadRequest:
+        pass
+
 
 async def rebuild_feature_jobs(hours=48):
     now,end=datetime.now(TZ),datetime.now(TZ)+timedelta(hours=hours)
