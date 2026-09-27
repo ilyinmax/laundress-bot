@@ -826,6 +826,13 @@ def ensure_pra4ka2_tables():
         )
         """,
         """
+        CREATE TABLE IF NOT EXISTS waitlist_weekdays (
+            request_id INTEGER NOT NULL REFERENCES waitlist_requests(id) ON DELETE CASCADE,
+            weekday INTEGER NOT NULL CHECK (weekday BETWEEN 0 AND 6),
+            PRIMARY KEY (request_id, weekday)
+        )
+        """,
+        """
         CREATE TABLE IF NOT EXISTS notification_settings (
             user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
             quiet_enabled INTEGER NOT NULL DEFAULT 0,
@@ -892,6 +899,7 @@ def ensure_pra4ka2_tables():
         "CREATE INDEX IF NOT EXISTS idx_waitlist_status ON waitlist_requests(status, priority_since)",
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_waitlist_one_active_user ON waitlist_requests(user_id) WHERE status='active'",
         "CREATE INDEX IF NOT EXISTS idx_waitlist_intervals_req ON waitlist_intervals(request_id)",
+        "CREATE INDEX IF NOT EXISTS idx_waitlist_weekdays_req ON waitlist_weekdays(request_id)",
         "CREATE INDEX IF NOT EXISTS idx_holds_slot ON slot_holds(machine_id, date, hour, status)",
         "CREATE INDEX IF NOT EXISTS idx_holds_user ON slot_holds(user_id, status)",
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_holds_one_active_slot ON slot_holds(machine_id, date, hour) WHERE status='active'",
