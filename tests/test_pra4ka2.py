@@ -288,5 +288,58 @@ class Pra4ka2Tests(unittest.TestCase):
         scheduler.remove_job(f"waitlist_hold_{int(hold_id)}")
 
 
+    def test_waitlist_weekday_preferences(self):
+        import waitlist_service as wl
+
+        first_date = datetime.now(TZ).date() + timedelta(days=1)
+        second_date = first_date + timedelta(days=1)
+        allowed_weekday = second_date.weekday()
+
+        wl.save_request(
+            1001,
+            [(7, 23)],
+            [],
+            True,
+            "auto",
+            weekdays=[allowed_weekday],
+        )
+
+        requests = wl._active_requests()
+        req = next(r for r in requests if r.tg_id == 1001)
+        self.assertEqual(req.weekdays, {allowed_weekday})
+        self.assertFalse(req.accepts_date(first_date.isoformat()))
+        self.assertTrue(req.accepts_date(second_date.isoformat()))
+
+        first_result = asyncio.run(
+            wl.distribute_date(first_date.isoformat(), context="day")
+        )
+        self.assertEqual(first_result, 0)
+        self.assertFalse(
+            database.get_user_bookings_today(
+                self.uid(1001), first_date.isoformat(), "wash"
+            )
+        )
+
+        second_result = asyncio.run(
+            wl.distribute_date(second_date.isoformat(), context="day")
+        )
+        self.assertGreaterEqual(second_result, 1)
+        self.assertTrue(
+            database.get_user_bookings_today(
+                self.uid(1001), second_date.isoformat(), "wash"
+            )
+        )
+
+    def test_waitlist_without_weekdays_means_any_day(self):
+        import waitlist_service as wl
+
+        wl.save_request(1002, [(7, 23)], [], True, "auto")
+        req = next(r for r in wl._active_requests() if r.tg_id == 1002)
+        self.assertEqual(req.weekdays, set())
+        self.assertTrue(req.accepts_date(
+            (datetime.now(TZ).date() + timedelta(days=1)).isoformat()
+        ))
+
+
 if __name__ == "__main__":
     unittest.main()
