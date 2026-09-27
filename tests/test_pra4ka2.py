@@ -191,5 +191,29 @@ class Pra4ka2Tests(unittest.TestCase):
         self.assertEqual(str(priority), old_priority)
 
 
+    def test_dryer_requires_wash_booking_and_next_hour_offer(self):
+        import booking_service as bs
+        from dryer_service import find_next_dryer
+
+        future = (datetime.now(TZ).date() + timedelta(days=1)).isoformat()
+        wash = self.mid("Стиральная №1")
+        dry = self.mid("Сушилка №2")
+        uid = self.uid(1001)
+
+        with self.assertRaises(bs.InvalidBooking):
+            asyncio.run(bs.create_booking_safe(uid, dry, future, 13))
+
+        wash_booking = asyncio.run(bs.create_booking_safe(uid, wash, future, 12))
+        self.assertTrue(wash_booking.booking_id)
+
+        offer = find_next_dryer(uid, future, 12)
+        self.assertIsNotNone(offer)
+        self.assertEqual(offer.machine_id, dry)
+        self.assertEqual(offer.hour, 13)
+
+        dry_booking = asyncio.run(bs.create_booking_safe(uid, dry, future, 13))
+        self.assertTrue(dry_booking.booking_id)
+
+
 if __name__ == "__main__":
     unittest.main()
