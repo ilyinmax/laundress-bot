@@ -56,6 +56,7 @@ def setup_scheduler():
             process_night_round,
             expire_holds,
             send_pending_notifications,
+            check_active_waitlist,
         )
         scheduler.add_job(
             process_night_round,
@@ -79,6 +80,14 @@ def setup_scheduler():
             trigger="interval",
             seconds=20,
             id="waitlist_pending_notifications",
+            replace_existing=True,
+            misfire_grace_time=60,
+        )
+        scheduler.add_job(
+            check_active_waitlist,
+            trigger="interval",
+            minutes=1,
+            id="waitlist_active_poll",
             replace_existing=True,
             misfire_grace_time=60,
         )
