@@ -82,6 +82,30 @@ def date_text(date_iso: str) -> str:
     return f"{WEEKDAYS[d.weekday()]}, {d.day} {MONTHS[d.month]}"
 
 
+def free_slots_per_type(date_iso: str) -> tuple[int, int]:
+    """Count free hourly slots for active washers and dryers."""
+    now = datetime.now(TZ)
+    today_iso = now.date().isoformat()
+
+    with get_conn() as conn:
+        machines = conn.execute(
+            "SELECT id,type FROM machines WHERE is_active ORDER BY type,name"
+        ).fetchall()
+
+    wash_slots = 0
+    dry_slots = 0
+    for machine_id, machine_type in machines:
+        hours = get_free_hours_effective(int(machine_id), str(date_iso))
+        if str(date_iso) == today_iso:
+            hours = [hour for hour in hours if int(hour) > now.hour]
+        if str(machine_type) == "wash":
+            wash_slots += len(hours)
+        elif str(machine_type) == "dry":
+            dry_slots += len(hours)
+
+    return wash_slots, dry_slots
+
+
 def booking_dates() -> list[tuple[str, str]]:
     now = datetime.now(TZ)
     today = now.date()
@@ -90,6 +114,7 @@ def booking_dates() -> list[tuple[str, str]]:
     out = []
     for offset in range(start, start + count):
         d = today + timedelta(days=offset)
+        date_iso = d.isoformat()
         if offset == 0:
             prefix = "Сегодня"
         elif offset == 1:
@@ -97,8 +122,14 @@ def booking_dates() -> list[tuple[str, str]]:
         elif offset == 2:
             prefix = "Послезавтра"
         else:
-            prefix = date_text(d.isoformat())
-        out.append((f"📅 {prefix}, {d.day} {MONTHS[d.month]}", d.isoformat()))
+            prefix = date_text(date_iso)
+
+        free_wash, free_dry = free_slots_per_type(date_iso)
+        label = (
+            f"📅 {prefix}, {d.day} {MONTHS[d.month]}"
+            f" • 🧺 {free_wash} / 🌬️ {free_dry}"
+        )
+        out.append((label, date_iso))
     return out
 
 
