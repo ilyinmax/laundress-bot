@@ -103,38 +103,27 @@ async def safe_edit(
         raise
 
 def _free_per_type_for_date(date_iso: str) -> tuple[int, int]:
+    """Количество реально доступных часовых слотов с учётом HOLD."""
     now = now_local()
     today_iso = now.date().isoformat()
 
     with get_conn() as conn:
         machines = conn.execute(
-            "SELECT id, type FROM machines WHERE is_active"
+            "SELECT id,type FROM machines WHERE is_active ORDER BY type,name"
         ).fetchall()
-
-    busy = _busy_map_for_date(date_iso)
 
     free_wash_slots = 0
     free_dry_slots = 0
-
-    for mid, mtype in machines:
-        mid = int(mid)
-        busy_hours = busy.get(mid, set())
-
-        # считаем свободные часы без доп. запросов
-        free_cnt = 0
-        for h in WORKING_HOURS:
-            if date_iso == today_iso and h <= now.hour:
-                continue
-            if h not in busy_hours:
-                free_cnt += 1
-
-        if mtype == "wash":
-            free_wash_slots += free_cnt
-        else:
-            free_dry_slots += free_cnt
+    for machine_id, machine_type in machines:
+        hours = get_free_hours_effective(int(machine_id), str(date_iso))
+        if str(date_iso) == today_iso:
+            hours = [h for h in hours if int(h) > now.hour]
+        if str(machine_type) == "wash":
+            free_wash_slots += len(hours)
+        elif str(machine_type) == "dry":
+            free_dry_slots += len(hours)
 
     return free_wash_slots, free_dry_slots
-
 
 '''
 # -------- вспомогательные подсчёты свободных --------
@@ -351,8 +340,6 @@ async def _show_machines_for_date(message: Message, date: str):
             reply_markup=kb,
         )
 
-    busy = _busy_map_for_date(date)
-
     # красиво форматируем дату
     try:
         d_obj = datetime.fromisoformat(date).date()
@@ -369,14 +356,9 @@ async def _show_machines_for_date(message: Message, date: str):
     any_free = False
     for machine_id, machine_type, machine_name in machines:
         machine_id = int(machine_id)
-        busy_hours = busy.get(machine_id, set())
-
-        free_hours = []
-        for h in WORKING_HOURS:
-            if date == today_iso and h <= now.hour:
-                continue
-            if h not in busy_hours:
-                free_hours.append(h)
+        free_hours = get_free_hours_effective(machine_id, date)
+        if date == today_iso:
+            free_hours = [h for h in free_hours if h > now.hour]
 
         if not free_hours:
             continue
@@ -461,15 +443,7 @@ async def choose_hour(callback: types.CallbackQuery):
             text="⚠️ Эта машина сейчас недоступна для записи. Выберите другую.",
         )
 
-    with get_conn() as conn:
-        busy_rows = conn.execute(
-            "SELECT hour FROM bookings WHERE machine_id=? AND date=?",
-            (machine_id, date),
-        ).fetchall()
-    busy_hours = {int(r[0]) for r in busy_rows}
-    free_hours = {h for h in WORKING_HOURS if h not in busy_hours}
-
-    #free_hours = set(get_free_hours(machine_id, date))
+    free_hours = set(get_free_hours_effective(machine_id, date))
     all_hours = WORKING_HOURS
 
     now = now_local()
