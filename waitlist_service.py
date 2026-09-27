@@ -271,11 +271,45 @@ def _free_slots(date_iso: str) -> list[tuple[int, int]]:
         machines = conn.execute(
             "SELECT id FROM machines WHERE type='wash' AND is_active ORDER BY id"
         ).fetchall()
+
+    now = datetime.now(TZ)
+    today_iso = now.date().isoformat()
     slots = []
     for (mid,) in machines:
-        for hour in get_free_hours_effective(int(mid), str(date_iso)):
+        hours = get_free_hours_effective(int(mid), str(date_iso))
+        if str(date_iso) == today_iso:
+            hours = [hour for hour in hours if int(hour) > now.hour]
+        for hour in hours:
             slots.append((int(mid), int(hour)))
     return slots
+
+
+def public_waitlist_dates(now: datetime | None = None) -> list[str]:
+    """Dates already visible to ordinary booking right now."""
+    now = now or datetime.now(TZ)
+    if now.hour >= 23:
+        offsets = (1, 2)
+    else:
+        offsets = (0, 1, 2)
+    return [(now.date() + timedelta(days=offset)).isoformat() for offset in offsets]
+
+
+async def check_active_waitlist() -> int:
+    """Fallback polling for slots that were already free before a request appeared."""
+    if not WAITLIST_ENABLED:
+        return 0
+
+    with get_conn() as conn:
+        active = conn.execute(
+            "SELECT 1 FROM waitlist_requests WHERE status='active' LIMIT 1"
+        ).fetchone()
+    if not active:
+        return 0
+
+    matched = 0
+    for date_iso in public_waitlist_dates():
+        matched += await distribute_date(date_iso, context="day")
+    return matched
 
 
 def _match(requests: list[Request], slots: list[tuple[int, int]]) -> dict[int, tuple[int, int]]:
