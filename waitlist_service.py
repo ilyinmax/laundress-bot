@@ -663,7 +663,7 @@ async def _distribute_date_locked(date_iso: str, *, context: str = "day") -> int
             """
             SELECT DISTINCT request_id
             FROM waitlist_offer_history
-            WHERE date=? AND result IN ('declined','expired') AND created_at>=?
+            WHERE date=? AND result IN ('declined','expired','cancelled_booking') AND created_at>=?
             """,
             (str(date_iso), recent_cutoff),
         ).fetchall()
