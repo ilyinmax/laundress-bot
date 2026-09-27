@@ -240,5 +240,53 @@ class Pra4ka2Tests(unittest.TestCase):
         self.assertEqual(str(booking[2]), "wash")
 
 
+    def test_waitlist_jobs_are_event_driven(self):
+        import waitlist_service as wl
+        from scheduler import scheduler
+
+        future = (datetime.now(TZ) + timedelta(minutes=2)).replace(microsecond=0)
+        uid = self.uid(1001)
+        mid = self.mid("Стиральная №1")
+        rid = wl.save_request(1001, [(7, 23)], [mid], False, "notify")
+
+        with database.get_conn() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO slot_holds
+                (request_id,user_id,machine_id,date,hour,expires_at,context,status,created_at)
+                VALUES (?,?,?,?,?,?,'day','active',?)
+                """,
+                (
+                    rid, uid, mid,
+                    (datetime.now(TZ).date() + timedelta(days=1)).isoformat(),
+                    12,
+                    future.isoformat(),
+                    datetime.now(TZ).isoformat(timespec="seconds"),
+                ),
+            )
+            hold_id = getattr(cur, "lastrowid", None)
+            if not hold_id:
+                hold_id = conn.execute(
+                    "SELECT id FROM slot_holds WHERE request_id=? ORDER BY id DESC LIMIT 1",
+                    (rid,),
+                ).fetchone()[0]
+
+        wl._schedule_hold_expiry(int(hold_id), future)
+        job = scheduler.get_job(f"waitlist_hold_{int(hold_id)}")
+        self.assertIsNotNone(job)
+        self.assertEqual(job.trigger.run_date.replace(microsecond=0), future)
+
+        # PRA4KA 2.0 must not keep Neon awake with periodic database polling.
+        forbidden = {
+            "waitlist_expire_holds",
+            "waitlist_pending_notifications",
+            "waitlist_active_poll",
+            "usage_history_tick",
+        }
+        self.assertTrue(forbidden.isdisjoint({j.id for j in scheduler.get_jobs()}))
+
+        scheduler.remove_job(f"waitlist_hold_{int(hold_id)}")
+
+
 if __name__ == "__main__":
     unittest.main()
