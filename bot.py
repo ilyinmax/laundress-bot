@@ -4,7 +4,7 @@ from aiogram import Bot, Dispatcher
 from config import BOT_TOKEN, WASHING_MACHINES, DRYERS
 from database import init_db, add_machine, get_machines_by_type
 from scheduler import setup_scheduler, attach_bot
-from waitlist_service import attach_bot as attach_waitlist_bot, process_night_round
+from waitlist_service import attach_bot as attach_waitlist_bot, process_night_round, rebuild_waitlist_jobs
 
 from handlers import registration, booking, admin_access, admin_extra, admin, pra4ka2
 from handlers.bot_commands import setup_bot_commands
@@ -50,6 +50,7 @@ async def main():
     attach_feature_bot(bot)
     attach_waitlist_bot(bot)
     await rebuild_feature_jobs(hours=48)
+    await rebuild_waitlist_jobs()
     from datetime import datetime
     from zoneinfo import ZoneInfo
     if datetime.now(ZoneInfo('Europe/Moscow')).hour == 23:

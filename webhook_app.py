@@ -51,7 +51,7 @@ dp = Dispatcher()
 # === Подключаем роутеры ===
 from handlers.registration import router as registration_router  # noqa: E402
 from handlers.pra4ka2 import router as pra4ka2_router  # noqa: E402
-from waitlist_service import attach_bot as attach_waitlist_bot, process_night_round  # noqa: E402
+from waitlist_service import attach_bot as attach_waitlist_bot, process_night_round, rebuild_waitlist_jobs  # noqa: E402
 from handlers.booking import router as booking_router  # noqa: E402
 from handlers.admin_access import router as admin_access_router, sync_dynamic_admins  # noqa: E402
 from handlers.admin_extra import router as admin_extra_router  # noqa: E402
@@ -125,6 +125,7 @@ async def background_init(app: web.Application):
 
         global REMINDERS_TASK, WH_RETRY_TASK
         REMINDERS_TASK = asyncio.create_task(rebuild_feature_jobs(hours=48))
+        asyncio.create_task(rebuild_waitlist_jobs())
         if datetime.now(ZoneInfo("Europe/Moscow")).hour == 23:
             asyncio.create_task(process_night_round())
 
