@@ -215,5 +215,30 @@ class Pra4ka2Tests(unittest.TestCase):
         self.assertTrue(dry_booking.booking_id)
 
 
+    def test_existing_free_slot_is_found_after_request_creation(self):
+        import waitlist_service as wl
+
+        wl.save_request(1001, [(13, 14)], [], True, "auto")
+        matched = asyncio.run(wl.check_active_waitlist())
+        self.assertGreaterEqual(matched, 1)
+
+        uid = self.uid(1001)
+        with database.get_conn() as conn:
+            booking = conn.execute(
+                """
+                SELECT b.date,b.hour,m.type
+                FROM bookings b
+                JOIN machines m ON m.id=b.machine_id
+                WHERE b.user_id=? AND m.type='wash'
+                ORDER BY b.date,b.hour
+                LIMIT 1
+                """,
+                (uid,),
+            ).fetchone()
+        self.assertIsNotNone(booking)
+        self.assertEqual(int(booking[1]), 13)
+        self.assertEqual(str(booking[2]), "wash")
+
+
 if __name__ == "__main__":
     unittest.main()
