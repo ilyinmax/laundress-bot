@@ -525,7 +525,11 @@ async def interval_menu(msg: types.Message, state: FSMContext):
 @router.message(WaitFlow.interval_start)
 async def interval_start(msg: types.Message, state: FSMContext):
     if msg.text == "⬅️ Назад":
-        return await show_waitlist_weekdays(msg, state)
+        await state.set_state(WaitFlow.intervals)
+        return await msg.answer(
+            "🕐 Интервалы",
+            reply_markup=reply_menu([["➕ Добавить интервал"], ["✅ Продолжить"], ["🏠 Главное меню"]]),
+        )
     data = await state.get_data()
     start = (data.get("start_map") or {}).get(msg.text)
     if start is None:
@@ -648,11 +652,7 @@ async def waitlist_machines(msg: types.Message, state: FSMContext):
     if msg.text == "🏠 Главное меню":
         return await show_home(msg, state)
     if msg.text == "⬅️ Назад":
-        await state.set_state(WaitFlow.intervals)
-        return await msg.answer(
-            "🕐 Интервалы",
-            reply_markup=reply_menu([["➕ Добавить интервал"], ["✅ Продолжить"], ["🏠 Главное меню"]]),
-        )
+        return await show_waitlist_weekdays(msg, state)
     data = await state.get_data()
     if msg.text == "✅ Продолжить":
         if not data.get("any_machine") and not data.get("selected_machines"):
