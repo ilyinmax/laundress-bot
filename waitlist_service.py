@@ -20,6 +20,7 @@ from database import (
     is_banned,
     record_usage_history,
     resident_user_ids,
+    _b64d_try,
 )
 from booking_service import create_booking_safe, BookingError, get_booking
 from dryer_service import find_next_dryer
@@ -427,11 +428,20 @@ def _active_requests(cutoff_at: str | None = None) -> list[Request]:
         weekdays.setdefault(int(rid), set()).add(int(weekday))
 
     result = []
-    for rid, uid, tg, mode, any_machine, priority_since in rows:
+    seen_residents = set()
+    for rid, uid, tg, mode, any_machine, priority_since, enc_surname, enc_room in rows:
         if int(tg) <= 0 or is_banned(int(tg)):
             continue
         if active_hold_for_user(int(uid)):
             continue
+
+        surname = (_b64d_try(enc_surname) or "").strip().casefold()
+        room = (_b64d_try(enc_room) or "").strip()
+        resident_key = (surname, room) if surname and room else ("user", int(uid))
+        if resident_key in seen_residents:
+            continue
+        seen_residents.add(resident_key)
+
         result.append(Request(
             int(rid), int(uid), int(tg), str(mode), bool(any_machine),
             _dt(priority_since), intervals.get(int(rid), []),
