@@ -19,6 +19,7 @@ from database import (
     active_hold_for_user,
     is_banned,
     record_usage_history,
+    resident_user_ids,
 )
 from booking_service import create_booking_safe, BookingError
 from dryer_service import find_next_dryer
@@ -251,6 +252,43 @@ def save_request(
         if is_banned(int(tg_id)):
             raise ValueError("Вы заблокированы и не можете использовать лист ожидания")
         user_id = int(user[0])
+
+        resident_ids = resident_user_ids(user_id)
+        peer_ids = [uid for uid in resident_ids if uid != user_id]
+        if peer_ids:
+            marks = ",".join("?" for _ in peer_ids)
+            peer_active = conn.execute(
+                f"""
+                SELECT 1 FROM waitlist_requests
+                WHERE user_id IN ({marks}) AND status='active'
+                LIMIT 1
+                """,
+                tuple(peer_ids),
+            ).fetchone()
+            if peer_active:
+                raise ValueError(
+                    "Для этого жильца уже есть активная заявка с другого Telegram-аккаунта."
+                )
+
+        now_date = now.date().isoformat()
+        resident_marks = ",".join("?" for _ in resident_ids)
+        future_rows = conn.execute(
+            f"""
+            SELECT b.date,b.hour
+            FROM bookings b
+            JOIN machines m ON m.id=b.machine_id
+            WHERE b.user_id IN ({resident_marks}) AND m.type='wash'
+              AND b.date>=?
+            """,
+            tuple(resident_ids) + (now_date,),
+        ).fetchall()
+        for date_value, booked_hour in future_rows:
+            ds = date_value.isoformat() if hasattr(date_value, "isoformat") else str(date_value)
+            if ds > now_date or (ds == now_date and int(booked_hour) > now.hour):
+                raise ValueError(
+                    "У вас уже есть будущая запись на стирку. Новую заявку можно создать после неё или после отмены."
+                )
+
         old = conn.execute(
             "SELECT id,mode,any_machine,priority_since FROM waitlist_requests WHERE user_id=? AND status='active'",
             (user_id,),
