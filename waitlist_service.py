@@ -21,7 +21,7 @@ from database import (
     record_usage_history,
     resident_user_ids,
 )
-from booking_service import create_booking_safe, BookingError
+from booking_service import create_booking_safe, BookingError, get_booking
 from dryer_service import find_next_dryer
 from keyboards import build_main_menu
 
@@ -954,8 +954,25 @@ async def decline_hold(hold_id: int, tg_id: int) -> bool:
 
 async def accept_hold(hold_id: int, tg_id: int):
     row = get_hold(hold_id)
-    if not row or int(row[3]) != int(tg_id) or str(row[11]) != "active":
+    if not row or int(row[3]) != int(tg_id):
         return None
+
+    status = str(row[11])
+    if status == "accepted":
+        with get_conn() as conn:
+            booking_row = conn.execute(
+                """
+                SELECT id FROM bookings
+                WHERE user_id=? AND machine_id=? AND date=? AND hour=?
+                ORDER BY id DESC LIMIT 1
+                """,
+                (int(row[2]), int(row[4]), str(row[6]), int(row[7])),
+            ).fetchone()
+        return get_booking(int(booking_row[0])) if booking_row else None
+
+    if status != "active":
+        return None
+
     if is_banned(int(tg_id)):
         with get_conn() as conn:
             conn.execute("UPDATE slot_holds SET status='cancelled' WHERE id=?", (int(hold_id),))
