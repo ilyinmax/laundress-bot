@@ -416,6 +416,18 @@ def _active_requests(cutoff_at: str | None = None) -> list[Request]:
         weekday_rows = conn.execute(
             "SELECT request_id,weekday FROM waitlist_weekdays"
         ).fetchall()
+        now_s = datetime.now(TZ).isoformat(timespec="seconds")
+        banned_rows = conn.execute(
+            "SELECT tg_id,banned_until FROM banned"
+        ).fetchall()
+        held_user_rows = conn.execute(
+            """
+            SELECT DISTINCT user_id
+            FROM slot_holds
+            WHERE status='active' AND expires_at>?
+            """,
+            (now_s,),
+        ).fetchall()
 
     intervals: dict[int, list[tuple[int, int]]] = {}
     for rid, start, end in interval_rows:
@@ -427,12 +439,27 @@ def _active_requests(cutoff_at: str | None = None) -> list[Request]:
     for rid, weekday in weekday_rows:
         weekdays.setdefault(int(rid), set()).add(int(weekday))
 
+    now = datetime.now(TZ)
+    banned_tg_ids = set()
+    for tg_id, banned_until in banned_rows:
+        if not banned_until:
+            continue
+        try:
+            until = datetime.fromisoformat(str(banned_until))
+            if until.tzinfo is None:
+                until = until.replace(tzinfo=TZ)
+            if until > now:
+                banned_tg_ids.add(int(tg_id))
+        except Exception:
+            banned_tg_ids.add(int(tg_id))
+    held_user_ids = {int(r[0]) for r in held_user_rows}
+
     result = []
     seen_residents = set()
     for rid, uid, tg, mode, any_machine, priority_since, enc_surname, enc_room in rows:
-        if int(tg) <= 0 or is_banned(int(tg)):
+        if int(tg) <= 0 or int(tg) in banned_tg_ids:
             continue
-        if active_hold_for_user(int(uid)):
+        if int(uid) in held_user_ids:
             continue
 
         surname = (_b64d_try(enc_surname) or "").strip().casefold()
