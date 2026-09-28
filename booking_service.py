@@ -6,7 +6,7 @@ from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
 from config import TIMEZONE, WORKING_HOURS
-from database import DATABASE_URL, get_conn, is_admin, is_banned, resident_user_ids
+from database import DATABASE_URL, get_conn, is_admin, is_banned
 
 TZ = ZoneInfo(TIMEZONE)
 _BOOKING_LOCK = asyncio.Lock()
@@ -124,8 +124,6 @@ def _insert_booking(
     if int(user[0]) > 0 and is_banned(int(user[0])):
         raise InvalidBooking("Вы заблокированы и не можете записываться")
 
-    resident_ids = resident_user_ids(int(user_id))
-
     machine = conn.execute(
         "SELECT type,name,is_active FROM machines WHERE id=?",
         (int(machine_id),),
@@ -138,16 +136,15 @@ def _insert_booking(
         raise InvalidBooking("Машина сейчас недоступна")
 
     if str(mtype) == "dry" and not is_admin(int(user[0])):
-        marks = ",".join("?" for _ in resident_ids)
         wash = conn.execute(
-            f"""
+            """
             SELECT 1
             FROM bookings b
             JOIN machines m ON m.id=b.machine_id
-            WHERE b.user_id IN ({marks}) AND b.date=? AND m.type='wash'
+            WHERE b.user_id=? AND b.date=? AND m.type='wash'
             LIMIT 1
             """,
-            tuple(resident_ids) + (str(date_iso),),
+            (int(user_id), str(date_iso)),
         ).fetchone()
         if not wash:
             raise InvalidBooking(
@@ -155,17 +152,16 @@ def _insert_booking(
             )
 
     if DATABASE_URL:
-        lock_key = f"booking:{min(resident_ids)}:{str(date_iso)}:{str(mtype)}"
+        lock_key = f"booking:{int(user_id)}:{str(date_iso)}:{str(mtype)}"
         conn.execute("SELECT pg_advisory_xact_lock(hashtext(?))", (lock_key,))
 
     if not is_admin(int(user[0])):
-        marks = ",".join("?" for _ in resident_ids)
-        params = list(resident_ids) + [str(date_iso), str(mtype)]
-        sql = f"""
+        params = [int(user_id), str(date_iso), str(mtype)]
+        sql = """
             SELECT 1
             FROM bookings b
             JOIN machines m ON m.id=b.machine_id
-            WHERE b.user_id IN ({marks}) AND b.date=? AND m.type=?
+            WHERE b.user_id=? AND b.date=? AND m.type=?
         """
         if ignore_booking_id is not None:
             sql += " AND b.id<>?"
@@ -220,59 +216,27 @@ def _insert_booking(
         )
 
     if close_waitlist and str(mtype) == "wash":
-        marks = ",".join("?" for _ in resident_ids)
-        active_requests = conn.execute(
-            f"""
-            SELECT id,user_id
-            FROM waitlist_requests
-            WHERE user_id IN ({marks}) AND status='active'
-            ORDER BY priority_since,id
+        conn.execute(
+            """
+            UPDATE waitlist_requests
+            SET status='matched',matched_booking_id=?,updated_at=?
+            WHERE user_id=? AND status='active'
             """,
-            tuple(resident_ids),
-        ).fetchall()
-
-        matched_request_id = None
-        for request_id, request_user_id in active_requests:
-            if int(request_user_id) == int(user_id):
-                matched_request_id = int(request_id)
-                break
-        if matched_request_id is None and active_requests:
-            matched_request_id = int(active_requests[0][0])
-
-        if matched_request_id is not None:
-            conn.execute(
-                """
-                UPDATE waitlist_requests
-                SET status='matched',matched_booking_id=?,updated_at=?
-                WHERE id=? AND status='active'
-                """,
-                (int(booking_id), now_s, matched_request_id),
+            (int(booking_id), now_s, int(user_id)),
+        )
+        conn.execute(
+            """
+            UPDATE slot_holds
+            SET status='cancelled'
+            WHERE request_id IN (
+                SELECT id FROM waitlist_requests
+                WHERE user_id=? AND status='matched' AND matched_booking_id=?
             )
-            for request_id, _request_user_id in active_requests:
-                if int(request_id) == matched_request_id:
-                    continue
-                conn.execute(
-                    """
-                    UPDATE waitlist_requests
-                    SET status='cancelled',updated_at=?
-                    WHERE id=? AND status='active'
-                    """,
-                    (now_s, int(request_id)),
-                )
-
-        if active_requests:
-            request_ids = [int(r[0]) for r in active_requests]
-            req_marks = ",".join("?" for _ in request_ids)
-            conn.execute(
-                f"""
-                UPDATE slot_holds
-                SET status='cancelled'
-                WHERE request_id IN ({req_marks})
-                  AND status='active'
-                  AND id<>COALESCE(?, -1)
-                """,
-                tuple(request_ids) + (allowed_hold_id,),
-            )
+              AND status='active'
+              AND id<>COALESCE(?, -1)
+            """,
+            (int(user_id), int(booking_id), allowed_hold_id),
+        )
 
     return BookingResult(
         int(booking_id),
