@@ -1143,49 +1143,67 @@ def get_availability_bulk(date_isos: list[str]):
 
 def record_usage_history(now: datetime | None = None) -> int:
     """
-    Record a wash once its booked start time has arrived.
-    Cancellation handlers reject already-started slots, so reaching the slot
-    is the objective signal used by the fairness system.
+    Record washes whose start time has arrived.
+
+    This is intentionally batched: the previous implementation performed one
+    SELECT per booking, which made the 23:00 distribution block the bot while
+    waiting for many Neon round-trips.
     """
     now = now or datetime.now(TZ)
     oldest = (now.date() - timedelta(days=7)).isoformat()
     newest = now.date().isoformat()
+
     with get_conn() as conn:
         rows = conn.execute(
             """
-            SELECT b.id, b.user_id, b.date, b.hour
+            SELECT b.id,b.user_id,b.date,b.hour
             FROM bookings b
             JOIN machines m ON m.id=b.machine_id
             WHERE m.type='wash' AND b.date BETWEEN ? AND ?
             """,
             (oldest, newest),
         ).fetchall()
-    inserted = 0
+
+    occurred_rows = []
     for booking_id, user_id, date_value, hour in rows:
         try:
-            d = datetime.fromisoformat(str(date_value)).date()
-            occurred = datetime.combine(d, datetime.min.time(), tzinfo=TZ).replace(hour=int(hour))
+            ds = date_value.isoformat() if hasattr(date_value, "isoformat") else str(date_value)
+            d = datetime.fromisoformat(ds).date()
+            occurred = datetime.combine(
+                d, datetime.min.time(), tzinfo=TZ
+            ).replace(hour=int(hour))
         except Exception:
             continue
-        if occurred > now:
-            continue
-        with get_conn() as conn:
-            before = conn.execute(
-                "SELECT 1 FROM laundry_usage_history WHERE booking_id=? LIMIT 1",
-                (int(booking_id),),
-            ).fetchone()
-            if before:
-                continue
+        if occurred <= now:
+            occurred_rows.append(
+                (int(booking_id), int(user_id), occurred.isoformat(timespec="seconds"))
+            )
+
+    if not occurred_rows:
+        return 0
+
+    booking_ids = [row[0] for row in occurred_rows]
+    marks = ",".join("?" for _ in booking_ids)
+    with get_conn() as conn:
+        existing = {
+            int(r[0])
+            for r in conn.execute(
+                f"SELECT booking_id FROM laundry_usage_history WHERE booking_id IN ({marks})",
+                tuple(booking_ids),
+            ).fetchall()
+        }
+        missing = [row for row in occurred_rows if row[0] not in existing]
+        for booking_id, user_id, occurred_at in missing:
             conn.execute(
                 """
-                INSERT INTO laundry_usage_history (user_id, booking_id, occurred_at)
-                VALUES (?, ?, ?)
+                INSERT INTO laundry_usage_history(user_id,booking_id,occurred_at)
+                VALUES (?,?,?)
                 ON CONFLICT(booking_id) DO NOTHING
                 """,
-                (int(user_id), int(booking_id), occurred.isoformat(timespec="seconds")),
+                (user_id, booking_id, occurred_at),
             )
-        inserted += 1
-    return inserted
+
+    return len(missing)
 
 
 def usage_penalties_for_users(user_ids: list[int], now: datetime | None = None) -> dict[int, int]:
