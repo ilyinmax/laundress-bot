@@ -389,7 +389,7 @@ def _active_requests(cutoff_at: str | None = None) -> list[Request]:
         if cutoff_at:
             rows = conn.execute(
                 """
-                SELECT wr.id,wr.user_id,u.tg_id,wr.mode,wr.any_machine,wr.priority_since
+                SELECT wr.id,wr.user_id,u.tg_id,wr.mode,wr.any_machine,wr.priority_since,u.surname,u.room
                 FROM waitlist_requests wr
                 JOIN users u ON u.id=wr.user_id
                 WHERE wr.status='active' AND wr.priority_since<=?
@@ -400,7 +400,7 @@ def _active_requests(cutoff_at: str | None = None) -> list[Request]:
         else:
             rows = conn.execute(
                 """
-                SELECT wr.id,wr.user_id,u.tg_id,wr.mode,wr.any_machine,wr.priority_since
+                SELECT wr.id,wr.user_id,u.tg_id,wr.mode,wr.any_machine,wr.priority_since,u.surname,u.room
                 FROM waitlist_requests wr
                 JOIN users u ON u.id=wr.user_id
                 WHERE wr.status='active'
