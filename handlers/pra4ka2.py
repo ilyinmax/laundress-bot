@@ -15,6 +15,7 @@ from database import (
     get_user,
     is_banned,
     get_free_hours_effective,
+    get_availability_bulk,
     get_notification_settings,
     set_notification_setting,
 )
@@ -116,9 +117,13 @@ def booking_dates() -> list[tuple[str, str]]:
     today = now.date()
     start = 1 if now.hour >= 23 else 0
     count = 2 if now.hour >= 23 else 3
+    raw_dates = [(offset, today + timedelta(days=offset)) for offset in range(start, start + count)]
+    date_isos = [d.isoformat() for _, d in raw_dates]
+    machines, availability = get_availability_bulk(date_isos)
+
     out = []
-    for offset in range(start, start + count):
-        d = today + timedelta(days=offset)
+    today_iso = today.isoformat()
+    for offset, d in raw_dates:
         date_iso = d.isoformat()
         if offset == 0:
             prefix = "Сегодня"
@@ -129,7 +134,17 @@ def booking_dates() -> list[tuple[str, str]]:
         else:
             prefix = date_text(date_iso)
 
-        free_wash, free_dry = free_slots_per_type(date_iso)
+        free_wash = 0
+        free_dry = 0
+        for machine_id, machine_type, _name in machines:
+            hours = list(availability.get(date_iso, {}).get(int(machine_id), []))
+            if date_iso == today_iso:
+                hours = [h for h in hours if h > now.hour]
+            if str(machine_type) == "wash":
+                free_wash += len(hours)
+            elif str(machine_type) == "dry":
+                free_dry += len(hours)
+
         label = (
             f"📅 {prefix}, {d.day} {MONTHS[d.month]}"
             f" • 🧺 {free_wash} / 🌬️ {free_dry}"
@@ -181,10 +196,7 @@ async def choose_date(msg: types.Message, state: FSMContext):
         return await msg.answer("Выберите дату кнопкой ниже.")
 
     now = datetime.now(TZ)
-    with get_conn() as conn:
-        machines = conn.execute(
-            "SELECT id,type,name FROM machines WHERE is_active ORDER BY type,name"
-        ).fetchall()
+    machines, availability = get_availability_bulk([date_iso])
 
     lines = [f"📅 <b>{date_text(date_iso)}</b>", ""]
     machine_map = {}
@@ -193,7 +205,7 @@ async def choose_date(msg: types.Message, state: FSMContext):
     for mid, mtype, name in machines:
         if str(mtype) == "dry" and not wash_exists:
             continue
-        hours = get_free_hours_effective(int(mid), date_iso)
+        hours = list(availability.get(date_iso, {}).get(int(mid), []))
         if date_iso == now.date().isoformat():
             hours = [h for h in hours if h > now.hour]
         if not hours:
@@ -911,10 +923,19 @@ async def waitlist_accept_callback(callback: types.CallbackQuery, state: FSMCont
         hold_id = int(callback.data.removeprefix("wl_accept_"))
     except Exception:
         return await callback.answer("Некорректное предложение.", show_alert=True)
+
+    # Telegram callback queries expire quickly. Acknowledge the click before
+    # any Neon work so the user never waits tens of seconds for button feedback.
+    try:
+        await callback.answer("Обрабатываю запись…")
+    except Exception:
+        pass
+
     result = await accept_hold(hold_id, callback.from_user.id)
     if not result:
-        return await callback.answer("Этот слот уже недоступен.", show_alert=True)
-    await callback.answer("Готово ✅")
+        return await callback.message.answer(
+            "⚠️ Этот слот уже недоступен. Если вы нажимали кнопку повторно, проверьте «Мои записи»."
+        )
     try:
         await callback.message.edit_reply_markup(reply_markup=None)
     except Exception:

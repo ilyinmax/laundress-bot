@@ -393,5 +393,100 @@ class Pra4ka2Tests(unittest.TestCase):
         )
 
 
+    def test_duplicate_resident_profiles_cannot_double_queue(self):
+        import waitlist_service as wl
+
+        database.save_user(2001, "Иванов", "101")
+        conflict = database.find_resident_profile_conflict(2001, "Иванов", "101")
+        self.assertIsNotNone(conflict)
+        self.assertEqual(int(conflict[1]), 1001)
+
+        first = wl.save_request(1001, [(18, 20)], [], True, "auto")
+        self.assertTrue(first)
+        with self.assertRaises(ValueError):
+            wl.save_request(2001, [(18, 20)], [], True, "auto")
+
+        active = [r for r in wl._active_requests() if r.tg_id in {1001, 2001}]
+        self.assertEqual(len(active), 1)
+
+    def test_duplicate_resident_accounts_share_usage_penalty(self):
+        now = datetime.now(TZ).replace(microsecond=0)
+        database.save_user(2001, "Иванов", "101")
+        first_uid = self.uid(1001)
+        second_uid = self.uid(2001)
+        mid = self.mid("Стиральная №1")
+        yesterday = (now.date() - timedelta(days=1)).isoformat()
+
+        with database.get_conn() as conn:
+            conn.execute(
+                "INSERT INTO bookings(user_id,machine_id,date,hour) VALUES (?,?,?,?)",
+                (first_uid, mid, yesterday, 7),
+            )
+        database.record_usage_history(now)
+        scores = database.usage_penalties_for_users([first_uid, second_uid], now)
+        self.assertEqual(scores[first_uid], 4)
+        self.assertEqual(scores[second_uid], 4)
+
+    def test_hold_acceptance_is_idempotent(self):
+        import waitlist_service as wl
+
+        future = (datetime.now(TZ).date() + timedelta(days=1)).isoformat()
+        uid = self.uid(1001)
+        mid = self.mid("Стиральная №1")
+        rid = wl.save_request(1001, [(10, 12)], [mid], False, "notify")
+        expires = datetime.now(TZ) + timedelta(minutes=2)
+
+        with database.get_conn() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO slot_holds
+                (request_id,user_id,machine_id,date,hour,expires_at,context,status,created_at)
+                VALUES (?,?,?,?,?,?,'day','active',?)
+                """,
+                (
+                    rid, uid, mid, future, 10,
+                    expires.isoformat(timespec="seconds"),
+                    datetime.now(TZ).isoformat(timespec="seconds"),
+                ),
+            )
+            hold_id = getattr(cur, "lastrowid", None)
+            if not hold_id:
+                hold_id = conn.execute(
+                    "SELECT id FROM slot_holds WHERE request_id=? ORDER BY id DESC LIMIT 1",
+                    (rid,),
+                ).fetchone()[0]
+
+        first = asyncio.run(wl.accept_hold(int(hold_id), 1001))
+        second = asyncio.run(wl.accept_hold(int(hold_id), 1001))
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertEqual(first.booking_id, second.booking_id)
+
+        with database.get_conn() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM bookings WHERE user_id=? AND machine_id=? AND date=? AND hour=?",
+                (uid, mid, future, 10),
+            ).fetchone()[0]
+        self.assertEqual(int(count), 1)
+
+    def test_bulk_availability_matches_effective_hours(self):
+        future = (datetime.now(TZ).date() + timedelta(days=1)).isoformat()
+        mid = self.mid("Стиральная №1")
+        uid = self.uid(1001)
+        with database.get_conn() as conn:
+            conn.execute(
+                "INSERT INTO bookings(user_id,machine_id,date,hour) VALUES (?,?,?,?)",
+                (uid, mid, future, 10),
+            )
+
+        machines, availability = database.get_availability_bulk([future])
+        self.assertTrue(machines)
+        self.assertNotIn(10, availability[future][mid])
+        self.assertEqual(
+            availability[future][mid],
+            database.get_free_hours_effective(mid, future),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

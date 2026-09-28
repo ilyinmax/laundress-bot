@@ -19,8 +19,10 @@ from database import (
     active_hold_for_user,
     is_banned,
     record_usage_history,
+    resident_user_ids,
+    _b64d_try,
 )
-from booking_service import create_booking_safe, BookingError
+from booking_service import create_booking_safe, BookingError, get_booking
 from dryer_service import find_next_dryer
 from keyboards import build_main_menu
 
@@ -251,6 +253,43 @@ def save_request(
         if is_banned(int(tg_id)):
             raise ValueError("Вы заблокированы и не можете использовать лист ожидания")
         user_id = int(user[0])
+
+        resident_ids = resident_user_ids(user_id)
+        peer_ids = [uid for uid in resident_ids if uid != user_id]
+        if peer_ids:
+            marks = ",".join("?" for _ in peer_ids)
+            peer_active = conn.execute(
+                f"""
+                SELECT 1 FROM waitlist_requests
+                WHERE user_id IN ({marks}) AND status='active'
+                LIMIT 1
+                """,
+                tuple(peer_ids),
+            ).fetchone()
+            if peer_active:
+                raise ValueError(
+                    "Для этого жильца уже есть активная заявка с другого Telegram-аккаунта."
+                )
+
+        now_date = now.date().isoformat()
+        resident_marks = ",".join("?" for _ in resident_ids)
+        future_rows = conn.execute(
+            f"""
+            SELECT b.date,b.hour
+            FROM bookings b
+            JOIN machines m ON m.id=b.machine_id
+            WHERE b.user_id IN ({resident_marks}) AND m.type='wash'
+              AND b.date>=?
+            """,
+            tuple(resident_ids) + (now_date,),
+        ).fetchall()
+        for date_value, booked_hour in future_rows:
+            ds = date_value.isoformat() if hasattr(date_value, "isoformat") else str(date_value)
+            if ds > now_date or (ds == now_date and int(booked_hour) > now.hour):
+                raise ValueError(
+                    "У вас уже есть будущая запись на стирку. Новую заявку можно создать после неё или после отмены."
+                )
+
         old = conn.execute(
             "SELECT id,mode,any_machine,priority_since FROM waitlist_requests WHERE user_id=? AND status='active'",
             (user_id,),
@@ -350,7 +389,7 @@ def _active_requests(cutoff_at: str | None = None) -> list[Request]:
         if cutoff_at:
             rows = conn.execute(
                 """
-                SELECT wr.id,wr.user_id,u.tg_id,wr.mode,wr.any_machine,wr.priority_since
+                SELECT wr.id,wr.user_id,u.tg_id,wr.mode,wr.any_machine,wr.priority_since,u.surname,u.room
                 FROM waitlist_requests wr
                 JOIN users u ON u.id=wr.user_id
                 WHERE wr.status='active' AND wr.priority_since<=?
@@ -361,7 +400,7 @@ def _active_requests(cutoff_at: str | None = None) -> list[Request]:
         else:
             rows = conn.execute(
                 """
-                SELECT wr.id,wr.user_id,u.tg_id,wr.mode,wr.any_machine,wr.priority_since
+                SELECT wr.id,wr.user_id,u.tg_id,wr.mode,wr.any_machine,wr.priority_since,u.surname,u.room
                 FROM waitlist_requests wr
                 JOIN users u ON u.id=wr.user_id
                 WHERE wr.status='active'
@@ -389,11 +428,20 @@ def _active_requests(cutoff_at: str | None = None) -> list[Request]:
         weekdays.setdefault(int(rid), set()).add(int(weekday))
 
     result = []
-    for rid, uid, tg, mode, any_machine, priority_since in rows:
+    seen_residents = set()
+    for rid, uid, tg, mode, any_machine, priority_since, enc_surname, enc_room in rows:
         if int(tg) <= 0 or is_banned(int(tg)):
             continue
         if active_hold_for_user(int(uid)):
             continue
+
+        surname = (_b64d_try(enc_surname) or "").strip().casefold()
+        room = (_b64d_try(enc_room) or "").strip()
+        resident_key = (surname, room) if surname and room else ("user", int(uid))
+        if resident_key in seen_residents:
+            continue
+        seen_residents.add(resident_key)
+
         result.append(Request(
             int(rid), int(uid), int(tg), str(mode), bool(any_machine),
             _dt(priority_since), intervals.get(int(rid), []),
@@ -916,8 +964,25 @@ async def decline_hold(hold_id: int, tg_id: int) -> bool:
 
 async def accept_hold(hold_id: int, tg_id: int):
     row = get_hold(hold_id)
-    if not row or int(row[3]) != int(tg_id) or str(row[11]) != "active":
+    if not row or int(row[3]) != int(tg_id):
         return None
+
+    status = str(row[11])
+    if status == "accepted":
+        with get_conn() as conn:
+            booking_row = conn.execute(
+                """
+                SELECT id FROM bookings
+                WHERE user_id=? AND machine_id=? AND date=? AND hour=?
+                ORDER BY id DESC LIMIT 1
+                """,
+                (int(row[2]), int(row[4]), str(row[6]), int(row[7])),
+            ).fetchone()
+        return get_booking(int(booking_row[0])) if booking_row else None
+
+    if status != "active":
+        return None
+
     if is_banned(int(tg_id)):
         with get_conn() as conn:
             conn.execute("UPDATE slot_holds SET status='cancelled' WHERE id=?", (int(hold_id),))
