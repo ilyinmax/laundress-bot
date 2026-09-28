@@ -184,6 +184,28 @@ def get_active_request_for_tg(tg_id: int):
         ).fetchone()
 
 
+async def finalize_ban_cleanup(cleanup: dict | None) -> None:
+    """Release scheduler jobs and redistribute slots freed by a ban."""
+    if not cleanup:
+        return
+
+    dates_to_day = set()
+    dates_to_night = set()
+    now = datetime.now(TZ)
+
+    for hold_id, date_iso, context in cleanup.get("holds", []):
+        _cancel_hold_expiry(int(hold_id))
+        if str(context) == "night" and now.hour == 23:
+            dates_to_night.add(str(date_iso))
+        else:
+            dates_to_day.add(str(date_iso))
+
+    for date_iso in sorted(dates_to_night):
+        await distribute_date(date_iso, context="night")
+    for date_iso in sorted(dates_to_day):
+        await distribute_date(date_iso, context="day")
+
+
 def cancel_request_for_tg(tg_id: int) -> bool:
     now = datetime.now(TZ).isoformat(timespec="seconds")
     with get_conn() as conn:
