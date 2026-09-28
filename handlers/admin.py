@@ -282,7 +282,9 @@ async def admin_ban_user(callback: types.CallbackQuery):
     except Exception:
         return await callback.answer("Ошибка данных бан-кнопки.", show_alert=True)
 
-    ban_user(tg_id, reason="Бан из админ-панели", days=7)
+    cleanup = ban_user(tg_id, reason="Бан из админ-панели", days=7)
+    from waitlist_service import finalize_ban_cleanup
+    await finalize_ban_cleanup(cleanup)
     await _render_schedule(callback.message, date)
 
 
@@ -475,8 +477,16 @@ async def cmd_ban(msg: types.Message):
             reason = " ".join(a)
 
     # Финальный бан
-    ban_user(int(target_id), reason=reason, days=days)
-    await msg.answer(f"🚫 Забанен: <code>{target_id}</code> на {days} дн.\nПричина: {reason}", parse_mode="HTML")
+    cleanup = ban_user(int(target_id), reason=reason, days=days)
+    from waitlist_service import finalize_ban_cleanup
+    await finalize_ban_cleanup(cleanup)
+    await msg.answer(
+        f"🚫 Забанен: <code>{target_id}</code> на {days} дн.\n"
+        f"Причина: {reason}\n"
+        f"Активных заявок закрыто: {cleanup.get('cancelled_requests', 0)}\n"
+        f"Активных HOLD отменено: {len(cleanup.get('holds', []))}",
+        parse_mode="HTML",
+    )
 
 @router.message(Command("abookfio"))
 async def cmd_abookfio(msg: types.Message):

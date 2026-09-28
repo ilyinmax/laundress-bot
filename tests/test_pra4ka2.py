@@ -502,5 +502,70 @@ class Pra4ka2Tests(unittest.TestCase):
         )
 
 
+    def test_ban_cancels_waitlist_and_active_hold_but_keeps_booking(self):
+        import booking_service as bs
+        import waitlist_service as wl
+
+        future = (datetime.now(TZ).date() + timedelta(days=1)).isoformat()
+        uid = self.uid(1001)
+        mid = self.mid("Стиральная №1")
+
+        rid = wl.save_request(1001, [(10, 12)], [mid], False, "notify")
+        expires = datetime.now(TZ) + timedelta(minutes=2)
+
+        with database.get_conn() as conn:
+            cur_booking = conn.execute(
+                "INSERT INTO bookings(user_id,machine_id,date,hour) VALUES (?,?,?,?)",
+                (uid, mid, future, 9),
+            )
+            booking_id = getattr(cur_booking, "lastrowid", None)
+            if not booking_id:
+                booking_id = conn.execute(
+                    "SELECT id FROM bookings WHERE user_id=? AND machine_id=? AND date=? AND hour=?",
+                    (uid, mid, future, 9),
+                ).fetchone()[0]
+
+            cur = conn.execute(
+                """
+                INSERT INTO slot_holds
+                (request_id,user_id,machine_id,date,hour,expires_at,context,status,created_at)
+                VALUES (?,?,?,?,?,?,'day','active',?)
+                """,
+                (
+                    rid, uid, mid, future, 10,
+                    expires.isoformat(timespec="seconds"),
+                    datetime.now(TZ).isoformat(timespec="seconds"),
+                ),
+            )
+            hold_id = getattr(cur, "lastrowid", None)
+            if not hold_id:
+                hold_id = conn.execute(
+                    "SELECT id FROM slot_holds WHERE request_id=? ORDER BY id DESC LIMIT 1",
+                    (rid,),
+                ).fetchone()[0]
+
+        cleanup = database.ban_user(1001, reason="test", days=7)
+        self.assertEqual(cleanup["cancelled_requests"], 1)
+        self.assertEqual(len(cleanup["holds"]), 1)
+
+        with database.get_conn() as conn:
+            req_status = conn.execute(
+                "SELECT status FROM waitlist_requests WHERE id=?",
+                (rid,),
+            ).fetchone()[0]
+            hold_status = conn.execute(
+                "SELECT status FROM slot_holds WHERE id=?",
+                (int(hold_id),),
+            ).fetchone()[0]
+            booking_exists = conn.execute(
+                "SELECT 1 FROM bookings WHERE id=?",
+                (int(booking_id),),
+            ).fetchone()
+
+        self.assertEqual(str(req_status), "cancelled")
+        self.assertEqual(str(hold_status), "cancelled")
+        self.assertIsNotNone(booking_exists)
+
+
 if __name__ == "__main__":
     unittest.main()
