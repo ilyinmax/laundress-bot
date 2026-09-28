@@ -6,7 +6,7 @@ from datetime import datetime, time
 from zoneinfo import ZoneInfo
 
 from config import TIMEZONE, WORKING_HOURS
-from database import DATABASE_URL, get_conn, is_admin, is_banned
+from database import DATABASE_URL, get_conn, is_admin, is_banned, resident_user_ids
 
 TZ = ZoneInfo(TIMEZONE)
 _BOOKING_LOCK = asyncio.Lock()
@@ -124,6 +124,8 @@ def _insert_booking(
     if int(user[0]) > 0 and is_banned(int(user[0])):
         raise InvalidBooking("Вы заблокированы и не можете записываться")
 
+    resident_ids = resident_user_ids(int(user_id))
+
     machine = conn.execute(
         "SELECT type,name,is_active FROM machines WHERE id=?",
         (int(machine_id),),
@@ -136,15 +138,16 @@ def _insert_booking(
         raise InvalidBooking("Машина сейчас недоступна")
 
     if str(mtype) == "dry" and not is_admin(int(user[0])):
+        marks = ",".join("?" for _ in resident_ids)
         wash = conn.execute(
-            """
+            f"""
             SELECT 1
             FROM bookings b
             JOIN machines m ON m.id=b.machine_id
-            WHERE b.user_id=? AND b.date=? AND m.type='wash'
+            WHERE b.user_id IN ({marks}) AND b.date=? AND m.type='wash'
             LIMIT 1
             """,
-            (int(user_id), str(date_iso)),
+            tuple(resident_ids) + (str(date_iso),),
         ).fetchone()
         if not wash:
             raise InvalidBooking(
@@ -152,16 +155,17 @@ def _insert_booking(
             )
 
     if DATABASE_URL:
-        lock_key = f"booking:{int(user_id)}:{str(date_iso)}:{str(mtype)}"
+        lock_key = f"booking:{min(resident_ids)}:{str(date_iso)}:{str(mtype)}"
         conn.execute("SELECT pg_advisory_xact_lock(hashtext(?))", (lock_key,))
 
     if not is_admin(int(user[0])):
-        params = [int(user_id), str(date_iso), str(mtype)]
-        sql = """
+        marks = ",".join("?" for _ in resident_ids)
+        params = list(resident_ids) + [str(date_iso), str(mtype)]
+        sql = f"""
             SELECT 1
             FROM bookings b
             JOIN machines m ON m.id=b.machine_id
-            WHERE b.user_id=? AND b.date=? AND m.type=?
+            WHERE b.user_id IN ({marks}) AND b.date=? AND m.type=?
         """
         if ignore_booking_id is not None:
             sql += " AND b.id<>?"
