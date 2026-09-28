@@ -614,53 +614,6 @@ def add_user(tg_id, surname, room):
             (tg_id, _b64e(surname), _b64e(room))
         )
 
-def _resident_key(surname: str | None, room: str | None):
-    if not surname or not room:
-        return None
-    normalized_surname = " ".join(str(surname).strip().casefold().split())
-    normalized_room = str(room).strip()
-    return normalized_surname, normalized_room
-
-
-def find_resident_profile_conflict(tg_id: int, surname: str, room: str):
-    """Return another real Telegram user claiming the same surname+room."""
-    wanted = _resident_key(surname, room)
-    if not wanted:
-        return None
-    with get_conn() as conn:
-        rows = conn.execute(
-            "SELECT id,tg_id,surname,room,username FROM users WHERE tg_id>0 AND tg_id<>?",
-            (int(tg_id),),
-        ).fetchall()
-    for user_id, other_tg, enc_surname, enc_room, username in rows:
-        if _resident_key(_b64d_try(enc_surname), _b64d_try(enc_room)) == wanted:
-            return int(user_id), int(other_tg), username
-    return None
-
-
-def resident_user_ids(user_id: int) -> list[int]:
-    """All real Telegram accounts that claim the same normalized surname+room."""
-    with get_conn() as conn:
-        current = conn.execute(
-            "SELECT surname,room FROM users WHERE id=?",
-            (int(user_id),),
-        ).fetchone()
-        if not current:
-            return [int(user_id)]
-        wanted = _resident_key(_b64d_try(current[0]), _b64d_try(current[1]))
-        if not wanted:
-            return [int(user_id)]
-        rows = conn.execute(
-            "SELECT id,surname,room FROM users WHERE tg_id>0 AND surname IS NOT NULL AND room IS NOT NULL"
-        ).fetchall()
-    ids = [
-        int(uid)
-        for uid, enc_surname, enc_room in rows
-        if _resident_key(_b64d_try(enc_surname), _b64d_try(enc_room)) == wanted
-    ]
-    return sorted(set(ids or [int(user_id)]))
-
-
 def save_user(tg_id, surname, room):
     bind_stub_user_to_real(tg_id, surname, room)
     with get_conn() as conn:
@@ -1207,45 +1160,13 @@ def record_usage_history(now: datetime | None = None) -> int:
 
 
 def usage_penalties_for_users(user_ids: list[int], now: datetime | None = None) -> dict[int, int]:
-    """
-    Return weighted 30-day usage points: 4/3/2/1 by recency week.
-    Accounts with the same normalized surname+room share one fairness history,
-    so a second Telegram account cannot reset the usage penalty.
-    """
+    """Return weighted 30-day usage points: 4/3/2/1 by recency week."""
     ids = sorted({int(x) for x in user_ids})
     if not ids:
         return {}
-
     now = now or datetime.now(TZ)
     cutoff = now - timedelta(days=30)
-
-    with get_conn() as conn:
-        profiles = conn.execute(
-            "SELECT id,surname,room FROM users WHERE tg_id>0 AND surname IS NOT NULL AND room IS NOT NULL"
-        ).fetchall()
-
-    key_by_id = {}
-    ids_by_key = {}
-    for uid, enc_surname, enc_room in profiles:
-        key = _resident_key(_b64d_try(enc_surname), _b64d_try(enc_room))
-        if not key:
-            continue
-        key_by_id[int(uid)] = key
-        ids_by_key.setdefault(key, set()).add(int(uid))
-
-    groups = {}
-    peer_ids = set()
-    for uid in ids:
-        key = key_by_id.get(uid)
-        group = set(ids_by_key.get(key, {uid})) if key else {uid}
-        groups[uid] = group
-        peer_ids.update(group)
-
-    peers = sorted(peer_ids)
-    if not peers:
-        return {uid: 0 for uid in ids}
-
-    placeholders = ",".join(["?"] * len(peers))
+    placeholders = ",".join(["?"] * len(ids))
     with get_conn() as conn:
         rows = conn.execute(
             f"""
@@ -1253,10 +1174,9 @@ def usage_penalties_for_users(user_ids: list[int], now: datetime | None = None) 
             FROM laundry_usage_history
             WHERE user_id IN ({placeholders}) AND occurred_at>=?
             """,
-            tuple(peers) + (cutoff.isoformat(timespec="seconds"),),
+            tuple(ids) + (cutoff.isoformat(timespec="seconds"),),
         ).fetchall()
-
-    points_by_user = {uid: 0 for uid in peers}
+    result = {uid: 0 for uid in ids}
     for uid, occurred_at in rows:
         try:
             age_days = max(0, (now - datetime.fromisoformat(str(occurred_at))).days)
@@ -1272,9 +1192,5 @@ def usage_penalties_for_users(user_ids: list[int], now: datetime | None = None) 
             weight = 1
         else:
             weight = 0
-        points_by_user[int(uid)] = points_by_user.get(int(uid), 0) + weight
-
-    return {
-        uid: sum(points_by_user.get(peer_id, 0) for peer_id in groups[uid])
-        for uid in ids
-    }
+        result[int(uid)] = result.get(int(uid), 0) + weight
+    return result

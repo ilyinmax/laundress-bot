@@ -393,23 +393,20 @@ class Pra4ka2Tests(unittest.TestCase):
         )
 
 
-    def test_duplicate_resident_profiles_cannot_double_queue(self):
+    def test_same_surname_room_accounts_stay_independent(self):
         import waitlist_service as wl
 
         database.save_user(2001, "Иванов", "101")
-        conflict = database.find_resident_profile_conflict(2001, "Иванов", "101")
-        self.assertIsNotNone(conflict)
-        self.assertEqual(int(conflict[1]), 1001)
 
         first = wl.save_request(1001, [(18, 20)], [], True, "auto")
+        second = wl.save_request(2001, [(18, 20)], [], True, "auto")
         self.assertTrue(first)
-        with self.assertRaises(ValueError):
-            wl.save_request(2001, [(18, 20)], [], True, "auto")
+        self.assertTrue(second)
 
         active = [r for r in wl._active_requests() if r.tg_id in {1001, 2001}]
-        self.assertEqual(len(active), 1)
+        self.assertEqual(len(active), 2)
 
-    def test_duplicate_resident_accounts_share_usage_penalty(self):
+    def test_same_surname_room_accounts_have_separate_usage_history(self):
         now = datetime.now(TZ).replace(microsecond=0)
         database.save_user(2001, "Иванов", "101")
         first_uid = self.uid(1001)
@@ -425,7 +422,24 @@ class Pra4ka2Tests(unittest.TestCase):
         database.record_usage_history(now)
         scores = database.usage_penalties_for_users([first_uid, second_uid], now)
         self.assertEqual(scores[first_uid], 4)
-        self.assertEqual(scores[second_uid], 4)
+        self.assertEqual(scores[second_uid], 0)
+
+    def test_future_booking_blocks_only_same_account_waitlist(self):
+        import booking_service as bs
+        import waitlist_service as wl
+
+        database.save_user(2001, "Иванов", "101")
+        future = (datetime.now(TZ).date() + timedelta(days=1)).isoformat()
+        mid = self.mid("Стиральная №1")
+
+        first_uid = self.uid(1001)
+        asyncio.run(bs.create_booking_safe(first_uid, mid, future, 10))
+
+        with self.assertRaises(ValueError):
+            wl.save_request(1001, [(18, 20)], [], True, "auto")
+
+        second = wl.save_request(2001, [(18, 20)], [], True, "auto")
+        self.assertTrue(second)
 
     def test_hold_acceptance_is_idempotent(self):
         import waitlist_service as wl
