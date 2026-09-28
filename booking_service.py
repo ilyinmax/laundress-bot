@@ -220,27 +220,59 @@ def _insert_booking(
         )
 
     if close_waitlist and str(mtype) == "wash":
-        conn.execute(
-            """
-            UPDATE waitlist_requests
-            SET status='matched',matched_booking_id=?,updated_at=?
-            WHERE user_id=? AND status='active'
+        marks = ",".join("?" for _ in resident_ids)
+        active_requests = conn.execute(
+            f"""
+            SELECT id,user_id
+            FROM waitlist_requests
+            WHERE user_id IN ({marks}) AND status='active'
+            ORDER BY priority_since,id
             """,
-            (int(booking_id), now_s, int(user_id)),
-        )
-        conn.execute(
-            """
-            UPDATE slot_holds
-            SET status='cancelled'
-            WHERE request_id IN (
-                SELECT id FROM waitlist_requests
-                WHERE user_id=? AND status='matched' AND matched_booking_id=?
+            tuple(resident_ids),
+        ).fetchall()
+
+        matched_request_id = None
+        for request_id, request_user_id in active_requests:
+            if int(request_user_id) == int(user_id):
+                matched_request_id = int(request_id)
+                break
+        if matched_request_id is None and active_requests:
+            matched_request_id = int(active_requests[0][0])
+
+        if matched_request_id is not None:
+            conn.execute(
+                """
+                UPDATE waitlist_requests
+                SET status='matched',matched_booking_id=?,updated_at=?
+                WHERE id=? AND status='active'
+                """,
+                (int(booking_id), now_s, matched_request_id),
             )
-              AND status='active'
-              AND id<>COALESCE(?, -1)
-            """,
-            (int(user_id), int(booking_id), allowed_hold_id),
-        )
+            for request_id, _request_user_id in active_requests:
+                if int(request_id) == matched_request_id:
+                    continue
+                conn.execute(
+                    """
+                    UPDATE waitlist_requests
+                    SET status='cancelled',updated_at=?
+                    WHERE id=? AND status='active'
+                    """,
+                    (now_s, int(request_id)),
+                )
+
+        if active_requests:
+            request_ids = [int(r[0]) for r in active_requests]
+            req_marks = ",".join("?" for _ in request_ids)
+            conn.execute(
+                f"""
+                UPDATE slot_holds
+                SET status='cancelled'
+                WHERE request_id IN ({req_marks})
+                  AND status='active'
+                  AND id<>COALESCE(?, -1)
+                """,
+                tuple(request_ids) + (allowed_hold_id,),
+            )
 
     return BookingResult(
         int(booking_id),
