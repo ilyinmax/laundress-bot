@@ -9,7 +9,6 @@ from database import (
     get_user, save_user, is_banned, ban_user,
     register_failed_attempt, reset_failed_attempts,
     update_username,
-    find_resident_profile_conflict,
 )
 from keyboards import main_menu, start_menu, build_main_menu
 
@@ -125,14 +124,6 @@ async def reg_room(msg: types.Message, state: FSMContext):
     data = await state.get_data()
     surname = data.get("surname", "").strip()
 
-    conflict = find_resident_profile_conflict(tg_id, surname, room)
-    if conflict:
-        await state.clear()
-        return await msg.answer(
-            "⚠️ Для этой фамилии и комнаты уже зарегистрирован другой Telegram-аккаунт.\n\n"
-            "Если вы действительно сменили аккаунт, напишите @ilyinmax, чтобы перенести профиль."
-        )
-
     save_user(tg_id, surname, room)
 
     await msg.answer(
@@ -186,15 +177,6 @@ async def edit_room(msg: types.Message, state: FSMContext):
 
     data = await state.get_data()
     surname = data.get("surname", "").strip()
-
-    conflict = find_resident_profile_conflict(tg_id, surname, room)
-    if conflict:
-        await state.clear()
-        return await msg.answer(
-            "⚠️ Этот профиль уже привязан к другому Telegram-аккаунту.\n\n"
-            "Если это ваш старый аккаунт, напишите @ilyinmax, чтобы перенести профиль.",
-            reply_markup=build_main_menu(False),
-        )
 
     save_user(tg_id, surname, room)
     from waitlist_service import get_active_request_for_tg
