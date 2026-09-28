@@ -540,8 +540,18 @@ def ensure_ban_tables():
             """)
 
 def ban_user(tg_id: int, reason: str | None = None, days: int = 7):
-    until = (datetime.now(TZ) + timedelta(days=days)).isoformat(timespec="seconds")
-    banned_at = datetime.now(TZ).isoformat(timespec="seconds")
+    """
+    Ban a Telegram account and immediately remove it from the active waitlist.
+
+    Existing bookings are intentionally preserved: an admin can delete a booking
+    separately if that is desired. Active HOLDs are cancelled so their slots can
+    be redistributed immediately by the caller.
+    """
+    now = datetime.now(TZ)
+    until = (now + timedelta(days=days)).isoformat(timespec="seconds")
+    banned_at = now.isoformat(timespec="seconds")
+    cleanup = {"user_id": None, "holds": [], "cancelled_requests": 0}
+
     with get_conn() as conn:
         conn.execute("""
             INSERT INTO banned (tg_id, reason, banned_until, banned_at)
@@ -551,6 +561,62 @@ def ban_user(tg_id: int, reason: str | None = None, days: int = 7):
                 banned_until=excluded.banned_until,
                 banned_at=excluded.banned_at
         """, (tg_id, reason or "Без причины", until, banned_at))
+
+        user = conn.execute(
+            "SELECT id FROM users WHERE tg_id=?",
+            (int(tg_id),),
+        ).fetchone()
+        if not user:
+            return cleanup
+
+        user_id = int(user[0])
+        cleanup["user_id"] = user_id
+
+        hold_rows = conn.execute(
+            """
+            SELECT id,date,context
+            FROM slot_holds
+            WHERE user_id=? AND status='active'
+            """,
+            (user_id,),
+        ).fetchall()
+        cleanup["holds"] = [
+            (
+                int(hold_id),
+                date_value.isoformat() if hasattr(date_value, "isoformat") else str(date_value),
+                str(context),
+            )
+            for hold_id, date_value, context in hold_rows
+        ]
+
+        active_requests = conn.execute(
+            """
+            SELECT COUNT(*)
+            FROM waitlist_requests
+            WHERE user_id=? AND status='active'
+            """,
+            (user_id,),
+        ).fetchone()
+        cleanup["cancelled_requests"] = int(active_requests[0]) if active_requests else 0
+
+        conn.execute(
+            """
+            UPDATE waitlist_requests
+            SET status='cancelled',updated_at=?
+            WHERE user_id=? AND status='active'
+            """,
+            (banned_at, user_id),
+        )
+        conn.execute(
+            """
+            UPDATE slot_holds
+            SET status='cancelled'
+            WHERE user_id=? AND status='active'
+            """,
+            (user_id,),
+        )
+
+    return cleanup
 
 def is_banned(tg_id: int) -> bool:
     with get_conn() as conn:
