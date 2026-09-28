@@ -510,11 +510,21 @@ class Pra4ka2Tests(unittest.TestCase):
         uid = self.uid(1001)
         mid = self.mid("Стиральная №1")
 
-        booking = asyncio.run(bs.create_booking_safe(uid, mid, future, 9))
         rid = wl.save_request(1001, [(10, 12)], [mid], False, "notify")
         expires = datetime.now(TZ) + timedelta(minutes=2)
 
         with database.get_conn() as conn:
+            cur_booking = conn.execute(
+                "INSERT INTO bookings(user_id,machine_id,date,hour) VALUES (?,?,?,?)",
+                (uid, mid, future, 9),
+            )
+            booking_id = getattr(cur_booking, "lastrowid", None)
+            if not booking_id:
+                booking_id = conn.execute(
+                    "SELECT id FROM bookings WHERE user_id=? AND machine_id=? AND date=? AND hour=?",
+                    (uid, mid, future, 9),
+                ).fetchone()[0]
+
             cur = conn.execute(
                 """
                 INSERT INTO slot_holds
@@ -549,7 +559,7 @@ class Pra4ka2Tests(unittest.TestCase):
             ).fetchone()[0]
             booking_exists = conn.execute(
                 "SELECT 1 FROM bookings WHERE id=?",
-                (booking.booking_id,),
+                (int(booking_id),),
             ).fetchone()
 
         self.assertEqual(str(req_status), "cancelled")
