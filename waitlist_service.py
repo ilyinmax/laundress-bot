@@ -430,6 +430,15 @@ def _active_requests(cutoff_at: str | None = None) -> list[Request]:
             """,
             (now_s,),
         ).fetchall()
+        future_wash_rows = conn.execute(
+            """
+            SELECT DISTINCT b.user_id,b.date,b.hour
+            FROM bookings b
+            JOIN machines m ON m.id=b.machine_id
+            WHERE m.type='wash' AND b.date>=?
+            """,
+            (datetime.now(TZ).date().isoformat(),),
+        ).fetchall()
 
     intervals: dict[int, list[tuple[int, int]]] = {}
     for rid, start, end in interval_rows:
@@ -455,12 +464,22 @@ def _active_requests(cutoff_at: str | None = None) -> list[Request]:
         except Exception:
             banned_tg_ids.add(int(tg_id))
     held_user_ids = {int(r[0]) for r in held_user_rows}
+    today_iso = now.date().isoformat()
+    users_with_future_wash = set()
+    for uid, date_value, booked_hour in future_wash_rows:
+        ds = date_value.isoformat() if hasattr(date_value, "isoformat") else str(date_value)
+        if ds > today_iso or (ds == today_iso and int(booked_hour) > now.hour):
+            users_with_future_wash.add(int(uid))
 
     result = []
     for rid, uid, tg, mode, any_machine, priority_since in rows:
         if int(tg) <= 0 or int(tg) in banned_tg_ids:
             continue
         if int(uid) in held_user_ids:
+            continue
+        # Legacy requests created before the future-booking guard must not
+        # allow a user to stack another future wash.
+        if int(uid) in users_with_future_wash:
             continue
 
         result.append(Request(

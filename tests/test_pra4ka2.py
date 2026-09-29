@@ -567,5 +567,37 @@ class Pra4ka2Tests(unittest.TestCase):
         self.assertIsNotNone(booking_exists)
 
 
+    def test_legacy_active_request_is_excluded_if_user_already_has_future_wash(self):
+        import booking_service as bs
+        import waitlist_service as wl
+
+        tomorrow = (datetime.now(TZ).date() + timedelta(days=1)).isoformat()
+        later = (datetime.now(TZ).date() + timedelta(days=3)).isoformat()
+        uid = self.uid(1001)
+        mid = self.mid("Стиральная №1")
+
+        # Simulate an old active request that existed before the future-booking guard.
+        rid = wl.save_request(1001, [(7, 9)], [mid], False, "auto")
+        asyncio.run(bs.create_booking_safe(uid, mid, tomorrow, 7, close_waitlist=False))
+
+        requests = wl._active_requests()
+        self.assertNotIn(rid, {r.id for r in requests})
+
+        matched = asyncio.run(wl.distribute_date(later, context="day"))
+        self.assertEqual(matched, 0)
+
+        with database.get_conn() as conn:
+            future_washes = conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM bookings b
+                JOIN machines m ON m.id=b.machine_id
+                WHERE b.user_id=? AND m.type='wash' AND b.date>=?
+                """,
+                (uid, datetime.now(TZ).date().isoformat()),
+            ).fetchone()[0]
+        self.assertEqual(int(future_washes), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
