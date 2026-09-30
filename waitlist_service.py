@@ -550,7 +550,11 @@ def _match(requests: list[Request], slots: list[tuple[int, int]]) -> dict[int, t
 
     order = sorted(
         [r for r in requests if r.id in allowed],
-        key=lambda r: (len(allowed[r.id]), -r.queue_score(now), r.priority_since),
+        # Fairness is the primary criterion: users who have waited longer and
+        # washed less recently must not be overtaken only because another
+        # request has fewer compatible slots. The augmenting-path matcher
+        # below already rearranges assignments to preserve maximum occupancy.
+        key=lambda r: (-r.queue_score(now), len(allowed[r.id]), r.priority_since),
     )
 
     slot_owner: dict[tuple[int, int], int] = {}
