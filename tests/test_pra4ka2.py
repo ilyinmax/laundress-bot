@@ -149,6 +149,58 @@ class Pra4ka2Tests(unittest.TestCase):
         self.assertEqual(len(narrow_matched), 2)
         self.assertTrue(all(hour == 20 for _, hour in narrow_matched))
 
+    def test_fairness_beats_narrow_slot_count_without_losing_matching(self):
+        import waitlist_service as wl
+
+        now = datetime.now(TZ)
+        m1 = self.mid("Стиральная №1")
+
+        # Two high-priority users should receive the two available slots.
+        # A frequently-washing user with a narrow interval must not jump
+        # ahead merely because len(allowed) is smaller.
+        high_flexible = wl.Request(
+            id=9001,
+            user_id=9001,
+            tg_id=9001,
+            mode="auto",
+            any_machine=False,
+            priority_since=now - timedelta(hours=80),
+            intervals=[(20, 22)],
+            machines={m1},
+            usage_points=0,
+        )
+        high_narrow = wl.Request(
+            id=9002,
+            user_id=9002,
+            tg_id=9002,
+            mode="auto",
+            any_machine=False,
+            priority_since=now - timedelta(hours=78),
+            intervals=[(21, 22)],
+            machines={m1},
+            usage_points=0,
+        )
+        low_narrow = wl.Request(
+            id=9003,
+            user_id=9003,
+            tg_id=9003,
+            mode="auto",
+            any_machine=False,
+            priority_since=now - timedelta(hours=70),
+            intervals=[(20, 21)],
+            machines={m1},
+            usage_points=12,
+        )
+
+        matches = wl._match(
+            [high_flexible, high_narrow, low_narrow],
+            [(m1, 20), (m1, 21)],
+        )
+
+        self.assertEqual(set(matches), {9001, 9002})
+        self.assertEqual(len(set(matches.values())), 2)
+
+
     def test_night_cutoff_excludes_late_requests(self):
         import waitlist_service as wl
 
