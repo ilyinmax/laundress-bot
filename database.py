@@ -1011,6 +1011,26 @@ def ensure_pra4ka2_tables():
         conn.execute(
             "UPDATE waitlist_requests SET persistent=1 WHERE status='active'"
         )
+
+        # One-time repair for a short-lived intermediate deployment that
+        # accidentally reopened historical fulfilled requests at 17:49:04 MSK.
+        # These ids were identified from the production audit immediately
+        # after that deployment; they were not active subscriptions before it.
+        accidental_reactivations = (
+            4, 6, 9, 12, 17, 18, 19, 21, 27, 28, 29, 30, 31,
+            33, 36, 41, 42, 43, 46, 49, 53, 57, 58, 90,
+        )
+        marks = ",".join("?" for _ in accidental_reactivations)
+        conn.execute(
+            f"""
+            UPDATE waitlist_requests
+            SET status='cancelled',persistent=0,matched_booking_id=NULL
+            WHERE id IN ({marks})
+              AND created_at < '2026-10-01T00:00:00+03:00'
+            """,
+            accidental_reactivations,
+        )
+
         matched_rows = conn.execute(
             """
             SELECT wr.id,b.date,b.hour
