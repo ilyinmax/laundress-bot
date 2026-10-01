@@ -201,6 +201,26 @@ class Pra4ka2Tests(unittest.TestCase):
         self.assertEqual(len(set(matches.values())), 2)
 
 
+    def test_auto_booking_requires_thirty_minutes_notice(self):
+        import waitlist_service as wl
+
+        now = datetime(2026, 10, 1, 10, 30, 0, tzinfo=TZ)
+
+        self.assertTrue(
+            wl._auto_booking_allowed("2026-10-01", 11, now)
+        )
+        self.assertFalse(
+            wl._auto_booking_allowed(
+                "2026-10-01",
+                11,
+                now + timedelta(seconds=1),
+            )
+        )
+        self.assertTrue(
+            wl._auto_booking_allowed("2026-10-02", 7, now)
+        )
+
+
     def test_night_cutoff_excludes_late_requests(self):
         import waitlist_service as wl
 
