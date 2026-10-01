@@ -442,8 +442,22 @@ def _schedule_from_rows(rows) -> dict[int, list[tuple[int, int]]]:
     return schedule
 
 
+def _format_interval(start_hour: int, end_hour_exclusive: int) -> str:
+    """Show the first and last possible wash start, not the internal exclusive end."""
+    start = int(start_hour)
+    last_start = int(end_hour_exclusive) - 1
+    if start == last_start:
+        return f"{start:02d}:00"
+    return f"{start:02d}:00-{last_start:02d}:00"
+
+
 def _format_intervals(intervals: list[tuple[int, int]]) -> str:
-    return ", ".join(f"{int(a):02d}:00-{int(b):02d}:00" for a, b in intervals)
+    return ", ".join(_format_interval(a, b) for a, b in intervals)
+
+
+def _interval_end_choices(start_hour: int) -> list[int]:
+    """Visible choices are possible start times, including 22:00 but never 23:00."""
+    return list(range(int(start_hour), max(WORKING_HOURS) + 1))
 
 
 def _format_schedule(schedule: dict[int, list[tuple[int, int]]]) -> str:
@@ -690,7 +704,7 @@ async def show_common_intervals(msg: types.Message, state: FSMContext):
     await state.set_state(WaitFlow.intervals)
     if intervals:
         text = "🕐 <b>Одинаковое время</b>\n\n" + "\n".join(
-            f"• {a:02d}:00-{b:02d}:00" for a, b in intervals
+            f"• {_format_interval(a, b)}" for a, b in intervals
         )
     else:
         text = "🕐 <b>Одинаковое время</b>\n\nДобавьте до 3 удобных интервалов."
@@ -756,15 +770,20 @@ async def interval_start(msg: types.Message, state: FSMContext):
     if start is None:
         return await msg.answer("Выберите время кнопкой ниже.")
 
-    ends = list(range(int(start) + 1, max(WORKING_HOURS) + 2))
+    last_starts = _interval_end_choices(int(start))
     await state.set_state(WaitFlow.interval_end)
     await state.update_data(
         current_start=int(start),
-        end_map={f"{h:02d}:00": h for h in ends},
+        # Internally intervals stay half-open: choosing the last allowed start
+        # 22:00 is stored as end_hour=23.
+        end_map={f"{h:02d}:00": h + 1 for h in last_starts},
     )
-    labels = [f"{h:02d}:00" for h in ends]
+    labels = [f"{h:02d}:00" for h in last_starts]
     rows = [labels[i:i + 4] for i in range(0, len(labels), 4)] + [["⬅️ Назад"]]
-    await msg.answer("Выберите конец интервала:", reply_markup=reply_menu(rows))
+    await msg.answer(
+        "Выберите последнее подходящее время начала стирки:",
+        reply_markup=reply_menu(rows),
+    )
 
 
 @router.message(WaitFlow.interval_end)
