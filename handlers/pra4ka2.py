@@ -612,51 +612,156 @@ async def waitlist_create(msg: types.Message, state: FSMContext):
             "🔧 Лист ожидания временно недоступен.",
             reply_markup=main_kb(msg.from_user.id),
         )
-    await state.update_data(intervals=[])
-    await state.set_state(WaitFlow.intervals)
-    await msg.answer(
-        "🕐 Добавьте до 3 удобных интервалов времени.",
-        reply_markup=reply_menu([["➕ Добавить интервал"], ["✅ Продолжить"], ["🏠 Главное меню"]]),
+
+    is_edit = msg.text == "✏️ Изменить заявку"
+    current = _load_waitlist_form(msg.from_user.id) if is_edit else {}
+    await state.update_data(
+        is_edit=is_edit,
+        schedule=current.get("schedule", {}),
+        selected_machines=current.get("selected_machines", []),
+        any_machine=current.get("any_machine", True),
+        mode=current.get("mode", "auto"),
+        intervals=[],
+        selected_weekdays=[],
+        any_day=True,
     )
+    await show_schedule_mode(msg, state)
+
+
+async def show_schedule_mode(msg: types.Message, state: FSMContext):
+    await state.set_state(WaitFlow.schedule_mode)
+    await msg.answer(
+        "📆 <b>Как настроить удобное время?</b>\n\n"
+        "🕐 <b>Одинаковое время по дням</b>\n"
+        "Например: Пн, Ср и Пт с 18:00 до 22:00.\n\n"
+        "📆 <b>Разное время по дням</b>\n"
+        "Например: Пн 10:00-22:00, а Вт 18:00-22:00.",
+        parse_mode="HTML",
+        reply_markup=reply_menu([
+            ["🕐 Одинаковое время по дням"],
+            ["📆 Разное время по дням"],
+            ["🏠 Главное меню"],
+        ]),
+    )
+
+
+@router.message(WaitFlow.schedule_mode)
+async def waitlist_schedule_mode(msg: types.Message, state: FSMContext):
+    if msg.text == "🏠 Главное меню":
+        return await show_home(msg, state)
+
+    if msg.text == "🕐 Одинаковое время по дням":
+        await state.update_data(
+            schedule_mode="common",
+            intervals=[],
+            selected_weekdays=[],
+            any_day=True,
+        )
+        return await show_common_intervals(msg, state)
+
+    if msg.text == "📆 Разное время по дням":
+        await state.update_data(schedule_mode="flexible")
+        return await show_schedule_days(msg, state)
+
+    await msg.answer("Выберите способ настройки кнопкой ниже.")
+
+
+def _state_schedule(data: dict) -> dict[int, list[tuple[int, int]]]:
+    out: dict[int, list[tuple[int, int]]] = {}
+    for raw_day, raw_intervals in (data.get("schedule") or {}).items():
+        day = int(raw_day)
+        out[day] = [(int(a), int(b)) for a, b in raw_intervals]
+    return out
+
+
+def _merge_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted((int(a), int(b)) for a, b in intervals):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+async def show_common_intervals(msg: types.Message, state: FSMContext):
+    data = await state.get_data()
+    intervals = [(int(a), int(b)) for a, b in data.get("intervals", [])]
+    await state.set_state(WaitFlow.intervals)
+    if intervals:
+        text = "🕐 <b>Одинаковое время</b>\n\n" + "\n".join(
+            f"• {a:02d}:00-{b:02d}:00" for a, b in intervals
+        )
+    else:
+        text = "🕐 <b>Одинаковое время</b>\n\nДобавьте до 3 удобных интервалов."
+    rows = []
+    if len(intervals) < 3:
+        rows.append(["➕ Добавить интервал"])
+    rows += [["✅ Продолжить"], ["⬅️ Назад", "🏠 Главное меню"]]
+    await msg.answer(text, parse_mode="HTML", reply_markup=reply_menu(rows))
 
 
 @router.message(WaitFlow.intervals)
 async def interval_menu(msg: types.Message, state: FSMContext):
     if msg.text == "🏠 Главное меню":
         return await show_home(msg, state)
+    if msg.text == "⬅️ Назад":
+        return await show_schedule_mode(msg, state)
     if msg.text == "➕ Добавить интервал":
-        data = await state.get_data()
-        if len(data.get("intervals", [])) >= 3:
-            return await msg.answer("Можно добавить максимум 3 интервала.")
-        starts = [f"{h:02d}:00" for h in WORKING_HOURS]
-        await state.set_state(WaitFlow.interval_start)
-        await state.update_data(start_map={f"{h:02d}:00": h for h in WORKING_HOURS})
-        rows = [starts[i:i + 4] for i in range(0, len(starts), 4)] + [["⬅️ Назад"]]
-        return await msg.answer("Выберите начало интервала:", reply_markup=reply_menu(rows))
+        return await start_interval_picker(msg, state, target="common")
     if msg.text == "✅ Продолжить":
         data = await state.get_data()
-        intervals = data.get("intervals", [])
-        if not intervals:
+        if not data.get("intervals"):
             return await msg.answer("Добавьте хотя бы один интервал.")
         return await show_waitlist_weekdays(msg, state)
     await msg.answer("Выберите действие кнопкой ниже.")
 
 
+async def start_interval_picker(
+    msg: types.Message,
+    state: FSMContext,
+    *,
+    target: str,
+) -> None:
+    data = await state.get_data()
+    if target == "day":
+        weekday = int(data["current_weekday"])
+        intervals = _state_schedule(data).get(weekday, [])
+    else:
+        intervals = [(int(a), int(b)) for a, b in data.get("intervals", [])]
+
+    if len(intervals) >= 3:
+        await msg.answer("Можно добавить максимум 3 интервала на один день.")
+        return
+
+    starts = [f"{h:02d}:00" for h in WORKING_HOURS]
+    await state.set_state(WaitFlow.interval_start)
+    await state.update_data(
+        interval_target=target,
+        start_map={f"{h:02d}:00": h for h in WORKING_HOURS},
+    )
+    rows = [starts[i:i + 4] for i in range(0, len(starts), 4)] + [["⬅️ Назад"]]
+    await msg.answer("Выберите начало интервала:", reply_markup=reply_menu(rows))
+
+
 @router.message(WaitFlow.interval_start)
 async def interval_start(msg: types.Message, state: FSMContext):
-    if msg.text == "⬅️ Назад":
-        await state.set_state(WaitFlow.intervals)
-        return await msg.answer(
-            "🕐 Интервалы",
-            reply_markup=reply_menu([["➕ Добавить интервал"], ["✅ Продолжить"], ["🏠 Главное меню"]]),
-        )
     data = await state.get_data()
+    if msg.text == "⬅️ Назад":
+        if data.get("interval_target") == "day":
+            return await show_day_intervals(msg, state, int(data["current_weekday"]))
+        return await show_common_intervals(msg, state)
+
     start = (data.get("start_map") or {}).get(msg.text)
     if start is None:
         return await msg.answer("Выберите время кнопкой ниже.")
+
     ends = list(range(int(start) + 1, max(WORKING_HOURS) + 2))
     await state.set_state(WaitFlow.interval_end)
-    await state.update_data(current_start=int(start), end_map={f"{h:02d}:00": h for h in ends})
+    await state.update_data(
+        current_start=int(start),
+        end_map={f"{h:02d}:00": h for h in ends},
+    )
     labels = [f"{h:02d}:00" for h in ends]
     rows = [labels[i:i + 4] for i in range(0, len(labels), 4)] + [["⬅️ Назад"]]
     await msg.answer("Выберите конец интервала:", reply_markup=reply_menu(rows))
@@ -664,29 +769,32 @@ async def interval_start(msg: types.Message, state: FSMContext):
 
 @router.message(WaitFlow.interval_end)
 async def interval_end(msg: types.Message, state: FSMContext):
+    data = await state.get_data()
     if msg.text == "⬅️ Назад":
         await state.set_state(WaitFlow.interval_start)
         return await msg.answer("Выберите начало интервала ещё раз.")
-    data = await state.get_data()
+
     end = (data.get("end_map") or {}).get(msg.text)
     if end is None:
         return await msg.answer("Выберите время кнопкой ниже.")
-    intervals = list(data.get("intervals", []))
-    intervals.append((int(data["current_start"]), int(end)))
-    intervals = sorted(intervals)
-    merged = []
-    for a, b in intervals:
-        if merged and a <= merged[-1][1]:
-            merged[-1] = (merged[-1][0], max(merged[-1][1], b))
-        else:
-            merged.append((a, b))
+
+    new_interval = (int(data["current_start"]), int(end))
+    if data.get("interval_target") == "day":
+        weekday = int(data["current_weekday"])
+        schedule = _state_schedule(data)
+        merged = _merge_intervals(schedule.get(weekday, []) + [new_interval])
+        if len(merged) > 3:
+            return await msg.answer("Можно добавить максимум 3 интервала на один день.")
+        schedule[weekday] = merged
+        await state.update_data(schedule=schedule)
+        return await show_day_intervals(msg, state, weekday)
+
+    intervals = [(int(a), int(b)) for a, b in data.get("intervals", [])]
+    merged = _merge_intervals(intervals + [new_interval])
+    if len(merged) > 3:
+        return await msg.answer("Можно добавить максимум 3 интервала.")
     await state.update_data(intervals=merged)
-    await state.set_state(WaitFlow.intervals)
-    text = "\n".join(f"{i + 1}. {a:02d}:00-{b:02d}:00" for i, (a, b) in enumerate(merged))
-    await msg.answer(
-        "🕐 Выбранные интервалы:\n" + text,
-        reply_markup=reply_menu([["➕ Добавить интервал"], ["✅ Продолжить"], ["🏠 Главное меню"]]),
-    )
+    return await show_common_intervals(msg, state)
 
 
 async def show_waitlist_weekdays(msg: types.Message, state: FSMContext):
@@ -705,8 +813,7 @@ async def show_waitlist_weekdays(msg: types.Message, state: FSMContext):
     rows += [first, second, ["✅ Продолжить"], ["⬅️ Назад", "🏠 Главное меню"]]
     await msg.answer(
         "📆 Какие дни недели вам подходят?\n\n"
-        "Можно оставить любой день или выбрать несколько дней недели. "
-        "Это не конкретная дата: заявка будет ждать ближайший подходящий день.",
+        "Выбранные интервалы будут одинаковыми для всех этих дней.",
         reply_markup=reply_menu(rows),
     )
 
@@ -716,11 +823,7 @@ async def waitlist_weekdays(msg: types.Message, state: FSMContext):
     if msg.text == "🏠 Главное меню":
         return await show_home(msg, state)
     if msg.text == "⬅️ Назад":
-        await state.set_state(WaitFlow.intervals)
-        return await msg.answer(
-            "🕐 Интервалы",
-            reply_markup=reply_menu([["➕ Добавить интервал"], ["✅ Продолжить"], ["🏠 Главное меню"]]),
-        )
+        return await show_common_intervals(msg, state)
 
     data = await state.get_data()
     selected = set(int(x) for x in data.get("selected_weekdays", []))
@@ -729,6 +832,10 @@ async def waitlist_weekdays(msg: types.Message, state: FSMContext):
     if msg.text == "✅ Продолжить":
         if not any_day and not selected:
             return await msg.answer("Выберите хотя бы один день недели или «Любой день».")
+        intervals = [(int(a), int(b)) for a, b in data.get("intervals", [])]
+        days = list(range(7)) if any_day else sorted(selected)
+        schedule = {day: list(intervals) for day in days}
+        await state.update_data(schedule=schedule)
         return await show_waitlist_machines(msg, state)
 
     if msg.text in {"✅ Любой день", "⬜ Любой день"}:
@@ -749,16 +856,186 @@ async def waitlist_weekdays(msg: types.Message, state: FSMContext):
     return await show_waitlist_weekdays(msg, state)
 
 
+async def show_schedule_days(msg: types.Message, state: FSMContext):
+    data = await state.get_data()
+    schedule = _state_schedule(data)
+    await state.set_state(WaitFlow.schedule_days)
+
+    summary = _format_schedule(schedule) if schedule else "Пока ни один день не настроен."
+    first = [f"{'✅' if i in schedule else '⬜'} {WEEKDAY_SHORT[i]}" for i in range(4)]
+    second = [f"{'✅' if i in schedule else '⬜'} {WEEKDAY_SHORT[i]}" for i in range(4, 7)]
+    rows = [
+        first,
+        second,
+        ["✅ Продолжить"],
+        ["🕐 Одинаковое время по дням"],
+        ["⬅️ Назад", "🏠 Главное меню"],
+    ]
+    await msg.answer(
+        "📆 <b>Расписание по дням</b>\n\n"
+        f"{summary}\n\n"
+        "Нажмите на день, чтобы задать для него свои интервалы.",
+        parse_mode="HTML",
+        reply_markup=reply_menu(rows),
+    )
+
+
+@router.message(WaitFlow.schedule_days)
+async def waitlist_schedule_days(msg: types.Message, state: FSMContext):
+    if msg.text == "🏠 Главное меню":
+        return await show_home(msg, state)
+    if msg.text == "⬅️ Назад":
+        return await show_schedule_mode(msg, state)
+    if msg.text == "🕐 Одинаковое время по дням":
+        await state.update_data(schedule_mode="common", intervals=[], selected_weekdays=[], any_day=True)
+        return await show_common_intervals(msg, state)
+    if msg.text == "✅ Продолжить":
+        if not _state_schedule(await state.get_data()):
+            return await msg.answer("Настройте хотя бы один день.")
+        return await show_waitlist_machines(msg, state)
+
+    raw = (msg.text or "").replace("✅ ", "").replace("⬜ ", "")
+    if raw not in WEEKDAY_SHORT:
+        return await msg.answer("Выберите день кнопкой ниже.")
+    weekday = WEEKDAY_SHORT.index(raw)
+    await state.update_data(current_weekday=weekday)
+    return await show_day_intervals(msg, state, weekday)
+
+
+async def show_day_intervals(msg: types.Message, state: FSMContext, weekday: int):
+    data = await state.get_data()
+    schedule = _state_schedule(data)
+    intervals = schedule.get(int(weekday), [])
+    await state.set_state(WaitFlow.day_intervals)
+    await state.update_data(current_weekday=int(weekday))
+
+    time_text = _format_intervals(intervals) if intervals else "Время ещё не задано."
+    rows = []
+    if len(intervals) < 3:
+        rows.append(["➕ Добавить интервал"])
+    if intervals:
+        rows.append(["📋 Скопировать на другие дни"])
+        rows.append(["🗑 Убрать день"])
+    rows += [["✅ Готово"], ["🏠 Главное меню"]]
+
+    await msg.answer(
+        f"📆 <b>{WEEKDAYS[int(weekday)]}</b>\n\n"
+        f"🕐 {time_text}",
+        parse_mode="HTML",
+        reply_markup=reply_menu(rows),
+    )
+
+
+@router.message(WaitFlow.day_intervals)
+async def waitlist_day_intervals(msg: types.Message, state: FSMContext):
+    if msg.text == "🏠 Главное меню":
+        return await show_home(msg, state)
+
+    data = await state.get_data()
+    weekday = int(data["current_weekday"])
+
+    if msg.text == "➕ Добавить интервал":
+        return await start_interval_picker(msg, state, target="day")
+    if msg.text == "📋 Скопировать на другие дни":
+        schedule = _state_schedule(data)
+        if not schedule.get(weekday):
+            return await msg.answer("Сначала добавьте хотя бы один интервал.")
+        await state.update_data(copy_days=[])
+        return await show_copy_days(msg, state)
+    if msg.text == "🗑 Убрать день":
+        schedule = _state_schedule(data)
+        schedule.pop(weekday, None)
+        await state.update_data(schedule=schedule)
+        return await show_schedule_days(msg, state)
+    if msg.text == "✅ Готово":
+        return await show_schedule_days(msg, state)
+
+    await msg.answer("Выберите действие кнопкой ниже.")
+
+
+async def show_copy_days(msg: types.Message, state: FSMContext):
+    data = await state.get_data()
+    source = int(data["current_weekday"])
+    selected = set(int(x) for x in data.get("copy_days", []))
+    await state.set_state(WaitFlow.copy_days)
+
+    labels = []
+    for day in range(7):
+        if day == source:
+            continue
+        labels.append(f"{'✅' if day in selected else '⬜'} {WEEKDAY_SHORT[day]}")
+    rows = [labels[i:i + 3] for i in range(0, len(labels), 3)]
+    rows += [["✅ Применить"], ["⬅️ Назад", "🏠 Главное меню"]]
+    await msg.answer(
+        f"📋 Скопировать время из <b>{WEEKDAYS[source]}</b>\n\n"
+        "Выберите дни. Если в них уже есть интервалы, они будут заменены.",
+        parse_mode="HTML",
+        reply_markup=reply_menu(rows),
+    )
+
+
+@router.message(WaitFlow.copy_days)
+async def waitlist_copy_days(msg: types.Message, state: FSMContext):
+    if msg.text == "🏠 Главное меню":
+        return await show_home(msg, state)
+
+    data = await state.get_data()
+    source = int(data["current_weekday"])
+    if msg.text == "⬅️ Назад":
+        return await show_day_intervals(msg, state, source)
+
+    selected = set(int(x) for x in data.get("copy_days", []))
+    if msg.text == "✅ Применить":
+        if not selected:
+            return await msg.answer("Выберите хотя бы один день.")
+        schedule = _state_schedule(data)
+        source_intervals = list(schedule.get(source, []))
+        for day in selected:
+            schedule[int(day)] = list(source_intervals)
+        await state.update_data(schedule=schedule, copy_days=[])
+        return await show_schedule_days(msg, state)
+
+    raw = (msg.text or "").replace("✅ ", "").replace("⬜ ", "")
+    if raw not in WEEKDAY_SHORT:
+        return await msg.answer("Выберите день кнопкой ниже.")
+    day = WEEKDAY_SHORT.index(raw)
+    if day == source:
+        return await msg.answer("Это исходный день.")
+    if day in selected:
+        selected.remove(day)
+    else:
+        selected.add(day)
+    await state.update_data(copy_days=list(selected))
+    return await show_copy_days(msg, state)
+
+
 async def show_waitlist_machines(msg: types.Message, state: FSMContext):
+    data = await state.get_data()
     with get_conn() as conn:
         rows = conn.execute(
             "SELECT id,name FROM machines WHERE type='wash' AND is_active ORDER BY name"
         ).fetchall()
+
     machine_map = {str(name): int(mid) for mid, name in rows}
+    active_ids = set(machine_map.values())
+    selected = {
+        int(x) for x in data.get("selected_machines", [])
+        if int(x) in active_ids
+    }
+    any_machine = bool(data.get("any_machine", not selected))
+    if not any_machine and not selected:
+        any_machine = True
+
     await state.set_state(WaitFlow.machines)
-    await state.update_data(machine_map=machine_map, selected_machines=[], any_machine=True)
-    kb_rows = [["✅ Любая"]]
-    kb_rows += [[f"⬜ {name}"] for name in machine_map]
+    await state.update_data(
+        machine_map=machine_map,
+        selected_machines=list(selected),
+        any_machine=any_machine,
+    )
+
+    kb_rows = [["✅ Любая" if any_machine else "⬜ Любая"]]
+    for name, mid in machine_map.items():
+        kb_rows.append([f"{'✅' if mid in selected else '⬜'} {name}"])
     kb_rows += [["✅ Продолжить"], ["⬅️ Назад", "🏠 Главное меню"]]
     await msg.answer(
         "🧺 Какие стиральные машинки вам подходят?\n\n"
@@ -771,9 +1048,13 @@ async def show_waitlist_machines(msg: types.Message, state: FSMContext):
 async def waitlist_machines(msg: types.Message, state: FSMContext):
     if msg.text == "🏠 Главное меню":
         return await show_home(msg, state)
-    if msg.text == "⬅️ Назад":
-        return await show_waitlist_weekdays(msg, state)
+
     data = await state.get_data()
+    if msg.text == "⬅️ Назад":
+        if data.get("schedule_mode") == "common":
+            return await show_waitlist_weekdays(msg, state)
+        return await show_schedule_days(msg, state)
+
     if msg.text == "✅ Продолжить":
         if not data.get("any_machine") and not data.get("selected_machines"):
             return await msg.answer("Выберите хотя бы одну машинку.")
@@ -791,7 +1072,7 @@ async def waitlist_machines(msg: types.Message, state: FSMContext):
         )
 
     any_machine = bool(data.get("any_machine"))
-    selected = set(data.get("selected_machines", []))
+    selected = set(int(x) for x in data.get("selected_machines", []))
     machine_map = data.get("machine_map", {})
 
     if msg.text in {"✅ Любая", "⬜ Любая"}:
@@ -803,17 +1084,13 @@ async def waitlist_machines(msg: types.Message, state: FSMContext):
         if mid is None:
             return await msg.answer("Выберите машинку кнопкой ниже.")
         any_machine = False
-        if mid in selected:
-            selected.remove(mid)
+        if int(mid) in selected:
+            selected.remove(int(mid))
         else:
-            selected.add(mid)
+            selected.add(int(mid))
 
     await state.update_data(any_machine=any_machine, selected_machines=list(selected))
-    rows = [["✅ Любая" if any_machine else "⬜ Любая"]]
-    for name, mid in machine_map.items():
-        rows.append([f"{'✅' if mid in selected else '⬜'} {name}"])
-    rows += [["✅ Продолжить"], ["⬅️ Назад", "🏠 Главное меню"]]
-    await msg.answer("🧺 Выбор машинок обновлён:", reply_markup=reply_menu(rows))
+    return await show_waitlist_machines(msg, state)
 
 
 @router.message(WaitFlow.mode)
@@ -822,6 +1099,7 @@ async def waitlist_mode(msg: types.Message, state: FSMContext):
         return await show_home(msg, state)
     if msg.text == "⬅️ Назад":
         return await show_waitlist_machines(msg, state)
+
     if msg.text == "⚡ Записать автоматически":
         mode = "auto"
     elif msg.text == "🔔 Сначала спросить":
@@ -830,27 +1108,33 @@ async def waitlist_mode(msg: types.Message, state: FSMContext):
         return await msg.answer("Выберите режим кнопкой ниже.")
 
     data = await state.get_data()
+    schedule = _state_schedule(data)
+    if not schedule:
+        return await msg.answer("Сначала настройте расписание.")
+
     await state.update_data(mode=mode)
-    intervals = data.get("intervals", [])
-    times = "\n".join(f"• {a:02d}:00-{b:02d}:00" for a, b in intervals)
     if data.get("any_machine"):
         machines = "Любая стиральная машина"
     else:
         reverse = {v: k for k, v in (data.get("machine_map") or {}).items()}
-        machines = ", ".join(reverse.get(x, str(x)) for x in data.get("selected_machines", []))
+        machines = ", ".join(
+            reverse.get(int(x), str(x))
+            for x in data.get("selected_machines", [])
+        )
+
     mode_text = "Автозапись" if mode == "auto" else "Сначала спросить"
-    selected_days = sorted(int(x) for x in data.get("selected_weekdays", []))
-    day_text = "Любой день" if data.get("any_day", True) else ", ".join(WEEKDAY_SHORT[x] for x in selected_days)
+    is_edit = bool(data.get("is_edit"))
+    action = "✅ Сохранить заявку" if is_edit else "✅ Встать в очередь"
+
     await state.set_state(WaitFlow.confirm)
     await msg.answer(
-        "🔔 <b>Новая заявка</b>\n\n"
-        f"📆 Дни: {day_text}\n"
-        f"🕐 Время:\n{times}\n\n"
-        f"🧺 Машинки: {machines}\n"
-        f"⚡ Режим: {mode_text}\n\n"
-        "Заявка действует, пока вам не найдётся подходящее место или вы её не отмените.",
+        ("🔔 <b>Изменение заявки</b>\n\n" if is_edit else "🔔 <b>Новая заявка</b>\n\n")
+        + f"{_format_schedule(schedule)}\n\n"
+        + f"🧺 Машинки: {machines}\n"
+        + f"⚡ Режим: {mode_text}\n\n"
+        + "Заявка действует, пока вам не найдётся подходящее место или вы её не отмените.",
         parse_mode="HTML",
-        reply_markup=reply_menu([["✅ Встать в очередь"], ["⬅️ Назад", "🏠 Главное меню"]]),
+        reply_markup=reply_menu([[action], ["⬅️ Назад", "🏠 Главное меню"]]),
     )
 
 
@@ -861,25 +1145,35 @@ async def waitlist_confirm(msg: types.Message, state: FSMContext):
     if msg.text == "⬅️ Назад":
         await state.set_state(WaitFlow.mode)
         return await msg.answer("Выберите режим.")
-    if msg.text != "✅ Встать в очередь":
-        return await msg.answer("Подтвердите заявку кнопкой ниже.")
+
     data = await state.get_data()
+    expected = "✅ Сохранить заявку" if data.get("is_edit") else "✅ Встать в очередь"
+    if msg.text != expected:
+        return await msg.answer("Подтвердите заявку кнопкой ниже.")
+
+    schedule = _state_schedule(data)
     try:
         save_request(
             msg.from_user.id,
-            data.get("intervals", []),
+            [],
             data.get("selected_machines", []),
             bool(data.get("any_machine")),
             data.get("mode"),
-            [] if data.get("any_day", True) else data.get("selected_weekdays", []),
+            schedule=schedule,
         )
     except ValueError as exc:
         await state.clear()
         return await msg.answer(str(exc), reply_markup=main_kb(msg.from_user.id))
+
+    is_edit = bool(data.get("is_edit"))
     await state.clear()
     await msg.answer(
-        "✅ Вы добавлены в лист ожидания.\n\n"
-        "Если подходящее место уже свободно, бот проверит его сразу. "
+        (
+            "✅ Заявка обновлена. Накопленный приоритет сохранён.\n\n"
+            if is_edit
+            else "✅ Вы добавлены в лист ожидания.\n\n"
+        )
+        + "Если подходящее место уже свободно, бот проверит его сразу. "
         "Если заявка создана до 23:00, она участвует и в ближайшем приоритетном распределении новой даты.",
         reply_markup=main_kb(msg.from_user.id),
     )
