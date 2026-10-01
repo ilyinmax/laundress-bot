@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from config import TIMEZONE, WORKING_HOURS
