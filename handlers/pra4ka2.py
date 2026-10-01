@@ -57,10 +57,14 @@ class CancelFlow(StatesGroup):
 
 class WaitFlow(StatesGroup):
     menu = State()
+    schedule_mode = State()
     interval_start = State()
     interval_end = State()
     intervals = State()
     weekdays = State()
+    schedule_days = State()
+    day_intervals = State()
+    copy_days = State()
     machines = State()
     mode = State()
     confirm = State()
@@ -431,14 +435,98 @@ async def cancel_confirm(msg: types.Message, state: FSMContext):
     await distribute_date(old.date, context="day")
 
 
+def _schedule_from_rows(rows) -> dict[int, list[tuple[int, int]]]:
+    schedule: dict[int, list[tuple[int, int]]] = {}
+    for weekday, start_hour, end_hour in rows:
+        schedule.setdefault(int(weekday), []).append((int(start_hour), int(end_hour)))
+    return schedule
+
+
+def _format_intervals(intervals: list[tuple[int, int]]) -> str:
+    return ", ".join(f"{int(a):02d}:00-{int(b):02d}:00" for a, b in intervals)
+
+
+def _format_schedule(schedule: dict[int, list[tuple[int, int]]]) -> str:
+    if not schedule:
+        return "Не настроено"
+
+    groups: dict[tuple[tuple[int, int], ...], list[int]] = {}
+    for weekday in sorted(schedule):
+        key = tuple((int(a), int(b)) for a, b in schedule[weekday])
+        groups.setdefault(key, []).append(int(weekday))
+
+    lines = []
+    for intervals, days in groups.items():
+        day_text = "Каждый день" if days == list(range(7)) else ", ".join(WEEKDAY_SHORT[d] for d in days)
+        lines.append(f"📆 {day_text}\n🕐 {_format_intervals(list(intervals))}")
+    return "\n\n".join(lines)
+
+
+def _load_waitlist_form(tg_id: int) -> dict:
+    req = get_active_request_for_tg(tg_id)
+    if not req:
+        return {}
+
+    rid, mode, any_machine, _created_at, _priority_since = req
+    with get_conn() as conn:
+        schedule_rows = conn.execute(
+            """
+            SELECT weekday,start_hour,end_hour
+            FROM waitlist_schedule
+            WHERE request_id=?
+            ORDER BY weekday,start_hour
+            """,
+            (int(rid),),
+        ).fetchall()
+        if not schedule_rows:
+            intervals = [
+                (int(a), int(b))
+                for a, b in conn.execute(
+                    "SELECT start_hour,end_hour FROM waitlist_intervals WHERE request_id=? ORDER BY start_hour",
+                    (int(rid),),
+                ).fetchall()
+            ]
+            weekdays = [
+                int(r[0])
+                for r in conn.execute(
+                    "SELECT weekday FROM waitlist_weekdays WHERE request_id=? ORDER BY weekday",
+                    (int(rid),),
+                ).fetchall()
+            ]
+            days = weekdays or list(range(7))
+            schedule = {day: list(intervals) for day in days}
+        else:
+            schedule = _schedule_from_rows(schedule_rows)
+
+        machine_ids = [
+            int(r[0])
+            for r in conn.execute(
+                "SELECT machine_id FROM waitlist_machines WHERE request_id=? ORDER BY machine_id",
+                (int(rid),),
+            ).fetchall()
+        ]
+
+    return {
+        "schedule": schedule,
+        "selected_machines": machine_ids,
+        "any_machine": bool(any_machine),
+        "mode": str(mode),
+    }
+
+
 def _waitlist_summary(tg_id: int) -> str:
     req = get_active_request_for_tg(tg_id)
     if not req:
         return ""
-    rid, mode, any_machine, created_at, priority_since = req
+    rid, mode, any_machine, _created_at, _priority_since = req
     with get_conn() as conn:
-        intervals = conn.execute(
-            "SELECT start_hour,end_hour FROM waitlist_intervals WHERE request_id=? ORDER BY start_hour",
+        schedule_rows = conn.execute(
+            """
+            SELECT weekday,start_hour,end_hour
+            FROM waitlist_schedule
+            WHERE request_id=?
+            ORDER BY weekday,start_hour
+            """,
             (int(rid),),
         ).fetchall()
         machines = conn.execute(
@@ -449,18 +537,31 @@ def _waitlist_summary(tg_id: int) -> str:
             """,
             (int(rid),),
         ).fetchall()
-        weekdays = conn.execute(
-            "SELECT weekday FROM waitlist_weekdays WHERE request_id=? ORDER BY weekday",
-            (int(rid),),
-        ).fetchall()
-    times = ", ".join(f"{int(a):02d}:00-{int(b):02d}:00" for a, b in intervals)
+
+        if schedule_rows:
+            schedule = _schedule_from_rows(schedule_rows)
+        else:
+            intervals = [
+                (int(a), int(b))
+                for a, b in conn.execute(
+                    "SELECT start_hour,end_hour FROM waitlist_intervals WHERE request_id=? ORDER BY start_hour",
+                    (int(rid),),
+                ).fetchall()
+            ]
+            weekdays = [
+                int(r[0])
+                for r in conn.execute(
+                    "SELECT weekday FROM waitlist_weekdays WHERE request_id=? ORDER BY weekday",
+                    (int(rid),),
+                ).fetchall()
+            ]
+            schedule = {day: list(intervals) for day in (weekdays or list(range(7)))}
+
     machine_text = "Любая стиральная машина" if any_machine else ", ".join(str(x[0]) for x in machines)
-    day_text = "Любой день" if not weekdays else ", ".join(WEEKDAY_SHORT[int(x[0])] for x in weekdays)
     mode_text = "Автозапись" if mode == "auto" else "Сначала спросить"
     return (
         "🔔 <b>Активная заявка</b>\n\n"
-        f"📆 {day_text}\n"
-        f"🕐 {times}\n"
+        f"{_format_schedule(schedule)}\n\n"
         f"🧺 {machine_text}\n"
         f"⚡ Режим: {mode_text}"
     )
