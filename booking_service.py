@@ -272,6 +272,20 @@ async def create_booking_safe(
                 close_waitlist=close_waitlist,
             )
             _commit(raw)
+
+            if result.machine_type == "wash" and close_waitlist:
+                # Lazy import avoids the booking_service <-> waitlist_service
+                # module cycle. A manual booking must pause the same persistent
+                # subscription just like a slot received from the waitlist.
+                try:
+                    from waitlist_service import sync_subscription_pause_for_user
+                    sync_subscription_pause_for_user(int(result.user_id))
+                except Exception:
+                    # Booking itself must stay valid even if scheduling the
+                    # subscription wake-up temporarily fails; startup recovery
+                    # rebuilds these jobs.
+                    pass
+
             return result
         except BookingError:
             _rollback(raw)
@@ -314,9 +328,9 @@ async def cancel_booking_safe(
             if booking.machine_type == "wash" and slot_time > now:
                 matched_request = conn.execute(
                     """
-                    SELECT id,priority_since
+                    SELECT id,priority_since,status
                     FROM waitlist_requests
-                    WHERE user_id=? AND status='matched' AND matched_booking_id=?
+                    WHERE user_id=? AND status IN ('matched','paused') AND matched_booking_id=?
                     LIMIT 1
                     """,
                     (int(booking.user_id), int(booking_id)),
@@ -326,6 +340,7 @@ async def cancel_booking_safe(
 
             if matched_request:
                 request_id = int(matched_request[0])
+                request_status = str(matched_request[2])
                 other_active = conn.execute(
                     """
                     SELECT 1
@@ -338,13 +353,23 @@ async def cancel_booking_safe(
 
                 if not other_active:
                     now_s = now.isoformat(timespec="seconds")
+                    # If this subscription was already waiting before it got
+                    # the booking, cancellation preserves the accumulated
+                    # priority. If it was created while a booking already
+                    # existed, waiting starts only now, at cancellation.
+                    priority_since = (
+                        now_s
+                        if request_status == "paused"
+                        else str(matched_request[1])
+                    )
                     conn.execute(
                         """
                         UPDATE waitlist_requests
-                        SET status='active',matched_booking_id=NULL,updated_at=?
-                        WHERE id=? AND status='matched'
+                        SET status='active',matched_booking_id=NULL,
+                            priority_since=?,updated_at=?
+                        WHERE id=? AND status IN ('matched','paused')
                         """,
-                        (now_s, request_id),
+                        (priority_since, now_s, request_id),
                     )
                     conn.execute(
                         """
@@ -365,6 +390,22 @@ async def cancel_booking_safe(
 
             booking.waitlist_reopened = waitlist_reopened
             _commit(raw)
+
+            if booking.machine_type == "wash":
+                try:
+                    from waitlist_service import (
+                        _cancel_subscription_resume,
+                        sync_subscription_pause_for_user,
+                    )
+                    if matched_request:
+                        _cancel_subscription_resume(int(matched_request[0]))
+                    # If another non-finished wash exists, keep the subscription
+                    # paused/matched against that one. Otherwise the reopened
+                    # request remains active from the cancellation moment.
+                    sync_subscription_pause_for_user(int(booking.user_id))
+                except Exception:
+                    pass
+
             return booking
         except BookingError:
             _rollback(raw)
