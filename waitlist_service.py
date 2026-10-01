@@ -518,6 +518,21 @@ async def rebuild_waitlist_jobs() -> None:
                 int(request_id), int(booking_id), date_iso, int(hour)
             )
 
+    # Normalize active persistent subscriptions against existing future
+    # washes. This is especially important for legacy subscriptions restored
+    # by the persistent-subscription migration: if the user already has a wash,
+    # the subscription becomes matched instead of competing for another slot.
+    with get_conn() as conn:
+        active_user_rows = conn.execute(
+            """
+            SELECT DISTINCT user_id
+            FROM waitlist_requests
+            WHERE persistent=1 AND status='active'
+            """
+        ).fetchall()
+    for (user_id,) in active_user_rows:
+        sync_subscription_pause_for_user(int(user_id))
+
     schedule_next_pending_notification()
     await check_active_waitlist()
 
