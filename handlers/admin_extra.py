@@ -248,6 +248,14 @@ def _fmt_dt(value) -> str:
         return str(value)
 
 
+def _fmt_wait_interval(start_hour: int, end_hour_exclusive: int) -> str:
+    start = int(start_hour)
+    last_start = int(end_hour_exclusive) - 1
+    if start == last_start:
+        return f"{start:02d}:00"
+    return f"{start:02d}:00-{last_start:02d}:00"
+
+
 def _admin_waitlist_keyboard(page: int, total: int) -> InlineKeyboardMarkup:
     pages = max(1, (total + ADMIN_WAITLIST_PAGE - 1) // ADMIN_WAITLIST_PAGE)
     page = min(max(0, page), pages - 1)
@@ -350,7 +358,7 @@ async def admin_waitlist(callback: types.CallbackQuery):
             schedule_parts = []
             for day in sorted(request_schedule):
                 times = ",".join(
-                    f"{a:02d}:00-{b:02d}:00"
+                    _fmt_wait_interval(a, b)
                     for a,b in request_schedule[day]
                 )
                 schedule_parts.append(f"{WEEKDAY_SHORT[day]} {times}")
@@ -358,7 +366,7 @@ async def admin_waitlist(callback: types.CallbackQuery):
         else:
             day_values = weekdays.get(int(rid), [])
             day_text = "любой день" if not day_values else ",".join(WEEKDAY_SHORT[x] for x in day_values)
-            time_text = ", ".join(f"{a:02d}:00-{b:02d}:00" for a,b in intervals.get(int(rid), [])) or "-"
+            time_text = ", ".join(_fmt_wait_interval(a, b) for a,b in intervals.get(int(rid), [])) or "-"
             schedule_text = f"{day_text} {time_text}"
         machine_text = "любая" if bool(any_machine) else ", ".join(machines.get(int(rid), [])) or "-"
         mode_text = "AUTO" if str(mode) == "auto" else "спросить"
