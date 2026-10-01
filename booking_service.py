@@ -341,6 +341,25 @@ async def cancel_booking_safe(
             if matched_request:
                 request_id = int(matched_request[0])
                 request_status = str(matched_request[2])
+                now_s = now.isoformat(timespec="seconds")
+
+                remaining_rows = conn.execute(
+                    """
+                    SELECT b.id,b.date,b.hour
+                    FROM bookings b
+                    JOIN machines m ON m.id=b.machine_id
+                    WHERE b.user_id=? AND m.type='wash' AND b.date>=?
+                    ORDER BY b.date,b.hour
+                    """,
+                    (int(booking.user_id), now.date().isoformat()),
+                ).fetchall()
+                remaining = []
+                for other_id, other_date, other_hour in remaining_rows:
+                    ds = other_date.isoformat() if hasattr(other_date, "isoformat") else str(other_date)
+                    end_at = slot_datetime(ds, int(other_hour)) + timedelta(hours=1)
+                    if end_at > now:
+                        remaining.append((int(other_id), ds, int(other_hour), end_at))
+
                 other_active = conn.execute(
                     """
                     SELECT 1
@@ -352,25 +371,48 @@ async def cancel_booking_safe(
                 ).fetchone()
 
                 if not other_active:
-                    now_s = now.isoformat(timespec="seconds")
-                    # If this subscription was already waiting before it got
-                    # the booking, cancellation preserves the accumulated
-                    # priority. If it was created while a booking already
-                    # existed, waiting starts only now, at cancellation.
-                    priority_since = (
-                        now_s
-                        if request_status == "paused"
-                        else str(matched_request[1])
-                    )
-                    conn.execute(
-                        """
-                        UPDATE waitlist_requests
-                        SET status='active',matched_booking_id=NULL,
-                            priority_since=?,updated_at=?
-                        WHERE id=? AND status IN ('matched','paused')
-                        """,
-                        (priority_since, now_s, request_id),
-                    )
+                    if remaining:
+                        next_booking_id, _next_date, _next_hour, next_end = remaining[-1]
+                        priority_since = (
+                            next_end.isoformat(timespec="seconds")
+                            if request_status == "paused"
+                            else str(matched_request[1])
+                        )
+                        conn.execute(
+                            """
+                            UPDATE waitlist_requests
+                            SET status=?,matched_booking_id=?,priority_since=?,updated_at=?
+                            WHERE id=? AND status IN ('matched','paused')
+                            """,
+                            (
+                                request_status,
+                                int(next_booking_id),
+                                priority_since,
+                                now_s,
+                                request_id,
+                            ),
+                        )
+                    else:
+                        # If this subscription was already waiting before it got
+                        # the booking, cancellation preserves the accumulated
+                        # priority. If it was created while a booking already
+                        # existed, waiting starts only now, at cancellation.
+                        priority_since = (
+                            now_s
+                            if request_status == "paused"
+                            else str(matched_request[1])
+                        )
+                        conn.execute(
+                            """
+                            UPDATE waitlist_requests
+                            SET status='active',matched_booking_id=NULL,
+                                priority_since=?,updated_at=?
+                            WHERE id=? AND status IN ('matched','paused')
+                            """,
+                            (priority_since, now_s, request_id),
+                        )
+                        waitlist_reopened = True
+
                     conn.execute(
                         """
                         INSERT INTO waitlist_offer_history
@@ -386,7 +428,6 @@ async def cancel_booking_safe(
                             now_s,
                         ),
                     )
-                    waitlist_reopened = True
 
             booking.waitlist_reopened = waitlist_reopened
             _commit(raw)
