@@ -413,6 +413,15 @@ class Pra4ka2Tests(unittest.TestCase):
         ))
 
 
+    def test_waitlist_interval_ui_uses_last_possible_start(self):
+        from handlers import pra4ka2 as ui
+
+        self.assertEqual(ui._interval_end_choices(18), [18, 19, 20, 21, 22])
+        self.assertEqual(ui._interval_end_choices(22), [22])
+        self.assertEqual(ui._format_intervals([(18, 23)]), "18:00-22:00")
+        self.assertEqual(ui._format_intervals([(22, 23)]), "22:00")
+
+
     def test_flexible_schedule_uses_different_hours_per_weekday(self):
         import waitlist_service as wl
 
