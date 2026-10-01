@@ -106,6 +106,252 @@ def _auto_booking_allowed(
     return _slot_start(date_iso, hour) - now >= timedelta(minutes=MIN_AUTO_LEAD_MINUTES)
 
 
+def _booking_end(date_iso: str, hour: int) -> datetime:
+    return _slot_start(date_iso, hour) + timedelta(hours=1)
+
+
+def _current_or_future_wash_bookings(
+    user_id: int,
+    now: datetime | None = None,
+    *,
+    exclude_booking_id: int | None = None,
+) -> list[tuple[int, str, int, datetime]]:
+    """Return wash bookings that have not finished yet, ordered by finish time."""
+    now = now or datetime.now(TZ)
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT b.id,b.date,b.hour
+            FROM bookings b
+            JOIN machines m ON m.id=b.machine_id
+            WHERE b.user_id=? AND m.type='wash' AND b.date>=?
+            ORDER BY b.date,b.hour
+            """,
+            (int(user_id), now.date().isoformat()),
+        ).fetchall()
+
+    result = []
+    for booking_id, date_value, hour in rows:
+        if exclude_booking_id is not None and int(booking_id) == int(exclude_booking_id):
+            continue
+        date_iso = date_value.isoformat() if hasattr(date_value, "isoformat") else str(date_value)
+        end_at = _booking_end(date_iso, int(hour))
+        if end_at > now:
+            result.append((int(booking_id), date_iso, int(hour), end_at))
+    return sorted(result, key=lambda row: row[3])
+
+
+def _subscription_resume_job_id(request_id: int) -> str:
+    return f"waitlist_resume_{int(request_id)}"
+
+
+def _cancel_subscription_resume(request_id: int) -> None:
+    _remove_job(_subscription_resume_job_id(int(request_id)))
+
+
+def _schedule_subscription_resume(
+    request_id: int,
+    booking_id: int,
+    date_iso: str,
+    hour: int,
+) -> None:
+    """Wake exactly when the controlling wash ends; no polling is required."""
+    from apscheduler.triggers.date import DateTrigger
+    from scheduler import scheduler
+
+    run_at = _booking_end(str(date_iso), int(hour))
+    now = datetime.now(TZ)
+    if run_at <= now:
+        run_at = now + timedelta(seconds=1)
+
+    scheduler.add_job(
+        resume_subscription_after_wash,
+        trigger=DateTrigger(run_date=run_at),
+        id=_subscription_resume_job_id(int(request_id)),
+        args=[int(request_id), int(booking_id)],
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+
+def sync_subscription_pause_for_user(user_id: int) -> None:
+    """
+    Keep one persistent subscription paused while the user already has a wash.
+
+    'paused' means the subscription was created while a booking already existed:
+    its priority has not started yet.
+    'matched' means an already-waiting subscription received a booking:
+    old priority is kept in case that booking is cancelled.
+    """
+    now = datetime.now(TZ)
+    bookings = _current_or_future_wash_bookings(int(user_id), now)
+    with get_conn() as conn:
+        req = conn.execute(
+            """
+            SELECT id,status,priority_since
+            FROM waitlist_requests
+            WHERE user_id=? AND status IN ('active','matched','paused')
+            ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'paused' THEN 1 ELSE 2 END,
+                     updated_at DESC
+            LIMIT 1
+            """,
+            (int(user_id),),
+        ).fetchone()
+        if not req:
+            return
+
+        request_id, status, priority_since = int(req[0]), str(req[1]), req[2]
+
+        if not bookings:
+            if status in {'matched', 'paused'}:
+                new_priority = (
+                    now.isoformat(timespec="seconds")
+                    if status == 'paused'
+                    else str(priority_since)
+                )
+                conn.execute(
+                    """
+                    UPDATE waitlist_requests
+                    SET status='active',matched_booking_id=NULL,priority_since=?,updated_at=?
+                    WHERE id=?
+                    """,
+                    (new_priority, now.isoformat(timespec="seconds"), request_id),
+                )
+            _cancel_subscription_resume(request_id)
+            return
+
+        booking_id, date_iso, hour, end_at = bookings[-1]
+        new_status = 'matched' if status in {'active', 'matched'} else 'paused'
+        new_priority = (
+            end_at.isoformat(timespec="seconds")
+            if new_status == 'paused'
+            else str(priority_since)
+        )
+        conn.execute(
+            """
+            UPDATE waitlist_requests
+            SET status=?,matched_booking_id=?,priority_since=?,updated_at=?
+            WHERE id=?
+            """,
+            (
+                new_status,
+                int(booking_id),
+                new_priority,
+                now.isoformat(timespec="seconds"),
+                request_id,
+            ),
+        )
+
+    _schedule_subscription_resume(request_id, booking_id, date_iso, hour)
+
+
+async def resume_subscription_after_wash(
+    request_id: int,
+    booking_id: int,
+    *,
+    now: datetime | None = None,
+    redistribute: bool = True,
+) -> bool:
+    """Reactivate a persistent subscription after its controlling wash finishes."""
+    now = now or datetime.now(TZ)
+
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT wr.user_id,wr.status,wr.matched_booking_id,b.date,b.hour
+            FROM waitlist_requests wr
+            LEFT JOIN bookings b ON b.id=wr.matched_booking_id
+            WHERE wr.id=? AND wr.status IN ('matched','paused')
+            """,
+            (int(request_id),),
+        ).fetchone()
+        if not row:
+            _cancel_subscription_resume(int(request_id))
+            return False
+
+        user_id, status, matched_booking_id, date_value, hour = row
+        if matched_booking_id is None or int(matched_booking_id) != int(booking_id):
+            return False
+
+        # Legacy rows can outlive their booking after booking-history cleanup.
+        if date_value is None or hour is None:
+            finished_at = now
+        else:
+            date_iso = date_value.isoformat() if hasattr(date_value, "isoformat") else str(date_value)
+            finished_at = _booking_end(date_iso, int(hour))
+            if finished_at > now:
+                _schedule_subscription_resume(
+                    int(request_id), int(booking_id), date_iso, int(hour)
+                )
+                return False
+
+    # A later wash may have been booked while this subscription was paused.
+    remaining = _current_or_future_wash_bookings(int(user_id), now)
+    if remaining:
+        next_booking_id, next_date, next_hour, next_end = remaining[-1]
+        with get_conn() as conn:
+            current = conn.execute(
+                "SELECT status,priority_since FROM waitlist_requests WHERE id=?",
+                (int(request_id),),
+            ).fetchone()
+            if not current:
+                return False
+            current_status = str(current[0])
+            priority = (
+                next_end.isoformat(timespec="seconds")
+                if current_status == 'paused'
+                else str(current[1])
+            )
+            conn.execute(
+                """
+                UPDATE waitlist_requests
+                SET matched_booking_id=?,priority_since=?,updated_at=?
+                WHERE id=? AND status IN ('matched','paused')
+                """,
+                (
+                    int(next_booking_id),
+                    priority,
+                    now.isoformat(timespec="seconds"),
+                    int(request_id),
+                ),
+            )
+        _schedule_subscription_resume(
+            int(request_id), int(next_booking_id), next_date, int(next_hour)
+        )
+        return False
+
+    with get_conn() as conn:
+        other_active = conn.execute(
+            """
+            SELECT 1 FROM waitlist_requests
+            WHERE user_id=? AND status='active' AND id<>?
+            LIMIT 1
+            """,
+            (int(user_id), int(request_id)),
+        ).fetchone()
+        if other_active:
+            _cancel_subscription_resume(int(request_id))
+            return False
+
+        conn.execute(
+            """
+            UPDATE waitlist_requests
+            SET status='active',matched_booking_id=NULL,priority_since=?,updated_at=?
+            WHERE id=? AND status IN ('matched','paused')
+            """,
+            (
+                finished_at.isoformat(timespec="seconds"),
+                now.isoformat(timespec="seconds"),
+                int(request_id),
+            ),
+        )
+
+    _cancel_subscription_resume(int(request_id))
+    if redistribute:
+        await check_active_waitlist()
+    return True
+
+
 def _remove_job(job_id: str) -> None:
     try:
         from scheduler import scheduler
@@ -194,18 +440,55 @@ async def rebuild_waitlist_jobs() -> None:
         else:
             _schedule_hold_expiry(int(hold_id), expires_at)
 
+    with get_conn() as conn:
+        subscriptions = conn.execute(
+            """
+            SELECT wr.id,wr.matched_booking_id,b.date,b.hour
+            FROM waitlist_requests wr
+            LEFT JOIN bookings b ON b.id=wr.matched_booking_id
+            WHERE wr.status IN ('matched','paused')
+            """
+        ).fetchall()
+
+    for request_id, booking_id, date_value, hour in subscriptions:
+        if booking_id is None or date_value is None or hour is None:
+            # Old matched rows whose booking has already been cleaned up should
+            # no longer stay stuck forever.
+            await resume_subscription_after_wash(
+                int(request_id),
+                int(booking_id or 0),
+                now=now,
+                redistribute=False,
+            )
+            continue
+        date_iso = date_value.isoformat() if hasattr(date_value, "isoformat") else str(date_value)
+        if _booking_end(date_iso, int(hour)) <= now:
+            await resume_subscription_after_wash(
+                int(request_id),
+                int(booking_id),
+                now=now,
+                redistribute=False,
+            )
+        else:
+            _schedule_subscription_resume(
+                int(request_id), int(booking_id), date_iso, int(hour)
+            )
+
     schedule_next_pending_notification()
     await check_active_waitlist()
 
 
 def get_active_request_for_tg(tg_id: int):
+    """Return the user's current persistent subscription, even while it is paused."""
     with get_conn() as conn:
         return conn.execute(
             """
             SELECT wr.id,wr.mode,wr.any_machine,wr.created_at,wr.priority_since
             FROM waitlist_requests wr
             JOIN users u ON u.id=wr.user_id
-            WHERE u.tg_id=? AND wr.status='active'
+            WHERE u.tg_id=? AND wr.status IN ('active','matched','paused')
+            ORDER BY CASE wr.status WHEN 'active' THEN 0 WHEN 'paused' THEN 1 ELSE 2 END,
+                     wr.updated_at DESC
             LIMIT 1
             """,
             (int(tg_id),),
@@ -237,29 +520,37 @@ async def finalize_ban_cleanup(cleanup: dict | None) -> None:
 def cancel_request_for_tg(tg_id: int) -> bool:
     now = datetime.now(TZ).isoformat(timespec="seconds")
     with get_conn() as conn:
-        row = conn.execute(
+        rows = conn.execute(
             """
             SELECT wr.id FROM waitlist_requests wr
             JOIN users u ON u.id=wr.user_id
-            WHERE u.tg_id=? AND wr.status='active'
-            LIMIT 1
+            WHERE u.tg_id=? AND wr.status IN ('active','matched','paused')
             """,
             (int(tg_id),),
-        ).fetchone()
-        if not row:
-            return False
-        hold_rows = conn.execute(
-            "SELECT id FROM slot_holds WHERE request_id=? AND status='active'",
-            (int(row[0]),),
         ).fetchall()
-        conn.execute(
-            "UPDATE waitlist_requests SET status='cancelled',updated_at=? WHERE id=?",
-            (now, int(row[0])),
-        )
-        conn.execute(
-            "UPDATE slot_holds SET status='cancelled' WHERE request_id=? AND status='active'",
-            (int(row[0]),),
-        )
+        if not rows:
+            return False
+
+        request_ids = [int(r[0]) for r in rows]
+        hold_rows = []
+        for request_id in request_ids:
+            hold_rows.extend(
+                conn.execute(
+                    "SELECT id FROM slot_holds WHERE request_id=? AND status='active'",
+                    (request_id,),
+                ).fetchall()
+            )
+            conn.execute(
+                "UPDATE waitlist_requests SET status='cancelled',updated_at=? WHERE id=?",
+                (now, request_id),
+            )
+            conn.execute(
+                "UPDATE slot_holds SET status='cancelled' WHERE request_id=? AND status='active'",
+                (request_id,),
+            )
+
+    for request_id in request_ids:
+        _cancel_subscription_resume(request_id)
     for (hold_id,) in hold_rows:
         _cancel_hold_expiry(int(hold_id))
     return True
@@ -346,33 +637,40 @@ def save_request(
             raise ValueError("Вы заблокированы и не можете использовать лист ожидания")
         user_id = int(user[0])
 
-        now_date = now.date().isoformat()
-        future_rows = conn.execute(
-            """
-            SELECT b.date,b.hour
-            FROM bookings b
-            JOIN machines m ON m.id=b.machine_id
-            WHERE b.user_id=? AND m.type='wash'
-              AND b.date>=?
-            """,
-            (user_id, now_date),
-        ).fetchall()
-        for date_value, booked_hour in future_rows:
-            ds = date_value.isoformat() if hasattr(date_value, "isoformat") else str(date_value)
-            if ds > now_date or (ds == now_date and int(booked_hour) > now.hour):
-                raise ValueError(
-                    "У вас уже есть будущая запись на стирку. Новую заявку можно создать после неё или после отмены."
-                )
+        open_bookings = _current_or_future_wash_bookings(user_id, now)
+        controlling_booking = open_bookings[-1] if open_bookings else None
 
-        old = conn.execute(
-            "SELECT id,mode,any_machine,priority_since FROM waitlist_requests WHERE user_id=? AND status='active'",
+        current_rows = conn.execute(
+            """
+            SELECT id,mode,any_machine,priority_since,status,matched_booking_id
+            FROM waitlist_requests
+            WHERE user_id=? AND status IN ('active','matched','paused')
+            ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'paused' THEN 1 ELSE 2 END,
+                     updated_at DESC
+            """,
             (user_id,),
-        ).fetchone()
+        ).fetchall()
+        old = current_rows[0] if current_rows else None
         now_s = now.isoformat(timespec="seconds")
         hold_rows = []
 
+        # Legacy versions could leave an old matched row next to a newer active
+        # request. Keep one subscription when the user edits it.
+        for duplicate in current_rows[1:]:
+            duplicate_id = int(duplicate[0])
+            conn.execute(
+                "UPDATE waitlist_requests SET status='cancelled',updated_at=? WHERE id=?",
+                (now_s, duplicate_id),
+            )
+            conn.execute(
+                "UPDATE slot_holds SET status='cancelled' WHERE request_id=? AND status='active'",
+                (duplicate_id,),
+            )
+            _cancel_subscription_resume(duplicate_id)
+
         if old:
             request_id = int(old[0])
+            old_status = str(old[4])
             old_machines = {
                 int(r[0])
                 for r in conn.execute(
@@ -383,20 +681,50 @@ def save_request(
             new_machines = set() if any_machine else {int(x) for x in machine_ids}
 
             # Editing days/hours or switching AUTO/notify must not erase waiting
-            # time. Only changing the machine eligibility changes queue priority.
+            # time. Only changing machine eligibility resets an actively waiting
+            # subscription. Paused subscriptions do not start priority early.
             machine_conditions_changed = (
                 bool(old[2]) != bool(any_machine)
                 or old_machines != new_machines
             )
-            priority_since = now_s if machine_conditions_changed else str(old[3])
+
+            if controlling_booking:
+                booking_id, booking_date, booking_hour, booking_end = controlling_booking
+                if old_status == 'paused':
+                    status = 'paused'
+                    priority_since = booking_end.isoformat(timespec="seconds")
+                else:
+                    status = 'matched'
+                    priority_since = (
+                        now_s if (old_status == 'active' and machine_conditions_changed)
+                        else str(old[3])
+                    )
+                matched_booking_id = int(booking_id)
+            else:
+                status = 'active'
+                matched_booking_id = None
+                if old_status == 'paused':
+                    priority_since = now_s
+                elif old_status == 'active' and machine_conditions_changed:
+                    priority_since = now_s
+                else:
+                    priority_since = str(old[3])
 
             conn.execute(
                 """
                 UPDATE waitlist_requests
-                SET mode=?,any_machine=?,priority_since=?,updated_at=?
+                SET mode=?,status=?,any_machine=?,priority_since=?,matched_booking_id=?,updated_at=?
                 WHERE id=?
                 """,
-                (mode, int(bool(any_machine)), priority_since, now_s, request_id),
+                (
+                    mode,
+                    status,
+                    int(bool(any_machine)),
+                    priority_since,
+                    matched_booking_id,
+                    now_s,
+                    request_id,
+                ),
             )
             hold_rows = conn.execute(
                 "SELECT id FROM slot_holds WHERE request_id=? AND status='active'",
@@ -411,18 +739,41 @@ def save_request(
             conn.execute("DELETE FROM waitlist_weekdays WHERE request_id=?", (request_id,))
             conn.execute("DELETE FROM waitlist_schedule WHERE request_id=?", (request_id,))
         else:
+            if controlling_booking:
+                booking_id, booking_date, booking_hour, booking_end = controlling_booking
+                status = 'paused'
+                matched_booking_id = int(booking_id)
+                priority_since = booking_end.isoformat(timespec="seconds")
+            else:
+                status = 'active'
+                matched_booking_id = None
+                priority_since = now_s
+
             cur = conn.execute(
                 """
                 INSERT INTO waitlist_requests
-                (user_id,mode,status,any_machine,created_at,priority_since,updated_at)
-                VALUES (?,?,'active',?,?,?,?)
+                (user_id,mode,status,any_machine,created_at,priority_since,matched_booking_id,updated_at)
+                VALUES (?,?,?,?,?,?,?,?)
                 """,
-                (user_id, mode, int(bool(any_machine)), now_s, now_s, now_s),
+                (
+                    user_id,
+                    mode,
+                    status,
+                    int(bool(any_machine)),
+                    now_s,
+                    priority_since,
+                    matched_booking_id,
+                    now_s,
+                ),
             )
             request_id = getattr(cur, "lastrowid", None)
             if not request_id:
                 request_id = int(conn.execute(
-                    "SELECT id FROM waitlist_requests WHERE user_id=? AND status='active'",
+                    """
+                    SELECT id FROM waitlist_requests
+                    WHERE user_id=? AND status IN ('active','matched','paused')
+                    ORDER BY updated_at DESC LIMIT 1
+                    """,
                     (user_id,),
                 ).fetchone()[0])
 
@@ -460,6 +811,15 @@ def save_request(
     if old:
         for (hold_id,) in hold_rows:
             _cancel_hold_expiry(int(hold_id))
+
+    if controlling_booking:
+        booking_id, booking_date, booking_hour, _booking_end_at = controlling_booking
+        _schedule_subscription_resume(
+            int(request_id), int(booking_id), str(booking_date), int(booking_hour)
+        )
+    else:
+        _cancel_subscription_resume(int(request_id))
+
     return int(request_id)
 
 
@@ -1194,6 +1554,9 @@ async def accept_hold(hold_id: int, tg_id: int):
                     int(row[1]),
                 ),
             )
+        _schedule_subscription_resume(
+            int(row[1]), int(new.booking_id), str(new.date), int(new.hour)
+        )
         _cancel_hold_expiry(int(hold_id))
         await distribute_date(old.date, context="day")
         return new
