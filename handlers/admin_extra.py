@@ -292,9 +292,29 @@ async def admin_waitlist(callback: types.CallbackQuery):
         page = 0
 
     with get_conn() as conn:
-        total = int(conn.execute(
-            "SELECT COUNT(*) FROM waitlist_requests WHERE status='active'"
-        ).fetchone()[0])
+        counts = conn.execute(
+            """
+            SELECT
+                COUNT(*) FILTER (
+                    WHERE persistent=1 AND status IN ('active','matched','paused')
+                ) AS subscriptions,
+                COUNT(*) FILTER (
+                    WHERE persistent=1 AND status='active'
+                ) AS active,
+                COUNT(*) FILTER (
+                    WHERE persistent=1 AND status='matched'
+                ) AS matched,
+                COUNT(*) FILTER (
+                    WHERE persistent=1 AND status='paused'
+                ) AS paused
+            FROM waitlist_requests
+            """
+        ).fetchone()
+        subscriptions = int(counts[0] or 0)
+        total = int(counts[1] or 0)
+        matched_total = int(counts[2] or 0)
+        paused_total = int(counts[3] or 0)
+
         pages = max(1, (total + ADMIN_WAITLIST_PAGE - 1) // ADMIN_WAITLIST_PAGE)
         page = min(page, pages - 1)
         rows = conn.execute(
@@ -303,7 +323,7 @@ async def admin_waitlist(callback: types.CallbackQuery):
                    wr.priority_since
             FROM waitlist_requests wr
             JOIN users u ON u.id=wr.user_id
-            WHERE wr.status='active'
+            WHERE wr.persistent=1 AND wr.status='active'
             ORDER BY wr.priority_since,wr.id
             LIMIT ? OFFSET ?
             """,
@@ -349,10 +369,17 @@ async def admin_waitlist(callback: types.CallbackQuery):
             ).fetchall():
                 weekdays.setdefault(int(rid), []).append(int(weekday))
 
-    lines = [f"🔔 <b>Активные заявки: {total}</b>"]
+    lines = [
+        f"🔔 <b>Подписки: {subscriptions}</b>",
+        f"⏳ Сейчас ждут место: {total}",
+        f"✅ Уже имеют запись: {matched_total}",
+    ]
+    if paused_total:
+        lines.append(f"⏸ Приостановлены: {paused_total}")
+    lines.append("")
+    lines.append("<b>Сейчас в очереди:</b>")
     if not rows:
-        lines.append("")
-        lines.append("Активных заявок нет.")
+        lines.append("Никто сейчас не ожидает свободный слот.")
     for idx,(rid,surname,room,username,mode,any_machine,priority_since) in enumerate(
         rows, start=page * ADMIN_WAITLIST_PAGE + 1
     ):
