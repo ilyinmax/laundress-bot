@@ -457,6 +457,11 @@ async def rebuild_waitlist_jobs() -> None:
         ).fetchall()
 
     for hold_id, expires_at, context, created_at in holds:
+        # night_pending is a durable fair-round reservation. It must not expire
+        # before the second phase has actually shown the user the offer.
+        if str(context) == "night_pending":
+            continue
+
         # A Render restart can consume most or all of a two-minute night HOLD.
         # Give the user a fresh two-minute response window after startup instead
         # of treating infrastructure downtime as a refusal.
@@ -569,6 +574,26 @@ async def rebuild_waitlist_jobs() -> None:
                         int(request_id),
                     ),
                 )
+
+    # Rebuild the durable second phase of a night round after a restart.
+    with get_conn() as conn:
+        pending_rounds = conn.execute(
+            """
+            SELECT target_date,cutoff_at,status
+            FROM waitlist_rounds
+            WHERE status IN ('holds_pending','holds_running')
+            ORDER BY target_date
+            """
+        ).fetchall()
+    for target_date, cutoff_at, status in pending_rounds:
+        try:
+            planned = _dt(cutoff_at) + timedelta(seconds=90)
+        except Exception:
+            planned = now + timedelta(seconds=1)
+        _schedule_night_hold_phase(
+            str(target_date),
+            max(planned, now + timedelta(seconds=1)),
+        )
 
     schedule_next_pending_notification()
     await check_active_waitlist()
@@ -1235,6 +1260,129 @@ async def _send_auto_confirmation(req: Request, result, *, night: bool) -> None:
         pass
 
 
+async def _reserve_night_hold(
+    req: Request,
+    machine_id: int,
+    date_iso: str,
+    hour: int,
+    hold_run_at: datetime,
+) -> int | None:
+    """
+    Persist a fair night-round HOLD winner without notifying yet.
+
+    The row is status=active immediately, so the slot is protected from normal
+    booking and redistribution across Render restarts. The user gets the actual
+    two-minute response window only when the second phase activates it.
+    """
+    expires = hold_run_at + timedelta(minutes=HOLD_MINUTES)
+    now = datetime.now(TZ)
+    with get_conn() as conn:
+        existing = conn.execute(
+            """
+            SELECT id FROM slot_holds
+            WHERE user_id=? AND status='active'
+            LIMIT 1
+            """,
+            (req.user_id,),
+        ).fetchone()
+        if existing:
+            return int(existing[0])
+
+        cur = conn.execute(
+            """
+            INSERT INTO slot_holds
+            (request_id,user_id,machine_id,date,hour,expires_at,context,status,created_at)
+            VALUES (?,?,?,?,?,?,'night_pending','active',?)
+            ON CONFLICT DO NOTHING
+            """,
+            (
+                req.id,
+                req.user_id,
+                int(machine_id),
+                str(date_iso),
+                int(hour),
+                expires.isoformat(timespec="seconds"),
+                now.isoformat(timespec="seconds"),
+            ),
+        )
+        hold_id = getattr(cur, "lastrowid", None)
+        if hold_id:
+            return int(hold_id)
+
+        row = conn.execute(
+            """
+            SELECT id FROM slot_holds
+            WHERE request_id=? AND machine_id=? AND date=? AND hour=?
+              AND status='active'
+            ORDER BY id DESC LIMIT 1
+            """,
+            (req.id, int(machine_id), str(date_iso), int(hour)),
+        ).fetchone()
+        return int(row[0]) if row else None
+
+
+async def _activate_pending_night_hold(hold_id: int) -> bool:
+    if BOT is None:
+        return False
+
+    now = datetime.now(TZ)
+    expires = now + timedelta(minutes=HOLD_MINUTES)
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT sh.request_id,sh.user_id,sh.machine_id,sh.date,sh.hour,
+                   u.tg_id,m.name
+            FROM slot_holds sh
+            JOIN users u ON u.id=sh.user_id
+            JOIN machines m ON m.id=sh.machine_id
+            WHERE sh.id=? AND sh.status='active' AND sh.context='night_pending'
+            """,
+            (int(hold_id),),
+        ).fetchone()
+        if not row:
+            return False
+
+        request_id,user_id,machine_id,date_iso,hour,tg_id,machine_name = row
+        conn.execute(
+            """
+            UPDATE slot_holds
+            SET context='night',expires_at=?
+            WHERE id=? AND status='active' AND context='night_pending'
+            """,
+            (expires.isoformat(timespec="seconds"), int(hold_id)),
+        )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Записаться", callback_data=f"wl_accept_{int(hold_id)}"),
+        InlineKeyboardButton(text="❌ Пропустить", callback_data=f"wl_decline_{int(hold_id)}"),
+    ]])
+    text = (
+        "🔔 <b>Для вас найдено место</b>\n\n"
+        f"📅 {pretty_date(str(date_iso))}\n"
+        f"🕐 {int(hour):02d}:00\n"
+        f"🧺 {machine_name}\n\n"
+        f"Слот зарезервирован за вами на {HOLD_MINUTES} минуты."
+    )
+    try:
+        await BOT.send_message(
+            int(tg_id),
+            text,
+            parse_mode="HTML",
+            reply_markup=kb,
+            disable_notification=_quiet_for(int(user_id)),
+        )
+        _schedule_hold_expiry(int(hold_id), expires)
+        await asyncio.sleep(0.04)
+        return True
+    except Exception:
+        with get_conn() as conn:
+            conn.execute(
+                "UPDATE slot_holds SET status='expired' WHERE id=?",
+                (int(hold_id),),
+            )
+        return False
+
+
 async def _create_hold(
     req: Request,
     machine_id: int,
@@ -1420,12 +1568,14 @@ async def _distribute_date_locked(
 
 async def process_night_round() -> None:
     """
-    Night distribution has two durable phases.
+    Fair night round in two execution phases.
 
-    23:00: AUTO winners are committed first.
-    ~23:01:30: HOLD offers are created only after the service has had time to
-    recover from a Render recycle. If a restart happens in between, startup
-    resumes from the persisted round status instead of restarting HOLD timers.
+    1) One global matching decides winners across AUTO and notify together.
+       AUTO winners are booked immediately. Notify winners get durable pending
+       reservations in Neon, but no message/timer yet.
+    2) About 90 seconds later pending reservations are activated as real HOLDs.
+
+    This preserves fairness across modes while remaining restart-safe.
     """
     if not WAITLIST_ENABLED:
         return
@@ -1459,11 +1609,11 @@ async def process_night_round() -> None:
         conn.execute(
             """
             INSERT INTO waitlist_rounds(target_date,cutoff_at,started_at,status)
-            VALUES (?,?,?,'auto_running')
+            VALUES (?,?,?,'matching')
             ON CONFLICT(target_date) DO UPDATE SET
                 cutoff_at=excluded.cutoff_at,
                 started_at=COALESCE(waitlist_rounds.started_at, excluded.started_at),
-                status='auto_running'
+                status='matching'
             """,
             (
                 target,
@@ -1472,13 +1622,23 @@ async def process_night_round() -> None:
             ),
         )
 
-    # Run AUTO against the full fairness matching, but do not start HOLD timers yet.
-    # Repeat because committing AUTO winners can expose another AUTO winner after
-    # the selected users disappear from the active candidate set.
-    for _ in range(len(WORKING_HOURS) + 1):
-        created = await distribute_date(target, context="night", phase="auto")
-        if created == 0:
-            break
+    record_usage_history()
+    requests = [r for r in _active_requests(cutoff.isoformat(timespec="seconds")) if r.accepts_date(target)]
+    slots = _free_slots(target)
+    matches = _match(requests, slots, date_iso=target) if requests else {}
+    by_id = {r.id: r for r in requests}
+
+    for rid, (mid, hour) in matches.items():
+        req = by_id[rid]
+        if req.mode == "auto" and _auto_booking_allowed(target, hour):
+            try:
+                result = await create_booking_safe(req.user_id, mid, target, hour)
+            except BookingError:
+                continue
+            await _schedule_booking_features(result)
+            await _send_auto_confirmation(req, result, night=True)
+        else:
+            await _reserve_night_hold(req, mid, target, hour, hold_run_at)
 
     with get_conn() as conn:
         conn.execute(
@@ -1504,14 +1664,23 @@ async def process_night_hold_phase(date_iso: str) -> None:
             "UPDATE waitlist_rounds SET status='holds_running' WHERE target_date=?",
             (str(date_iso),),
         )
+        pending = conn.execute(
+            """
+            SELECT id
+            FROM slot_holds
+            WHERE date=? AND status='active' AND context='night_pending'
+            ORDER BY id
+            """,
+            (str(date_iso),),
+        ).fetchall()
 
-    # One final AUTO drain protects against changes during the 90-second gap.
-    for _ in range(len(WORKING_HOURS) + 1):
-        created = await distribute_date(str(date_iso), context="night", phase="auto")
-        if created == 0:
-            break
+    for (hold_id,) in pending:
+        await _activate_pending_night_hold(int(hold_id))
 
-    await distribute_date(str(date_iso), context="night", phase="holds")
+    # Fill any slots left genuinely free because a winner became invalid or a
+    # pending offer could not be delivered. At this point the fair winners are
+    # already protected/booked, so normal matching is safe for leftovers.
+    await distribute_date(str(date_iso), context="night", phase="all")
 
     with get_conn() as conn:
         conn.execute(
