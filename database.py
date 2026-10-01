@@ -899,6 +899,15 @@ def ensure_pra4ka2_tables():
         )
         """,
         """
+        CREATE TABLE IF NOT EXISTS waitlist_schedule (
+            request_id INTEGER NOT NULL REFERENCES waitlist_requests(id) ON DELETE CASCADE,
+            weekday INTEGER NOT NULL CHECK (weekday BETWEEN 0 AND 6),
+            start_hour INTEGER NOT NULL,
+            end_hour INTEGER NOT NULL,
+            PRIMARY KEY (request_id, weekday, start_hour, end_hour)
+        )
+        """,
+        """
         CREATE TABLE IF NOT EXISTS notification_settings (
             user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
             quiet_enabled INTEGER NOT NULL DEFAULT 0,
@@ -966,6 +975,7 @@ def ensure_pra4ka2_tables():
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_waitlist_one_active_user ON waitlist_requests(user_id) WHERE status='active'",
         "CREATE INDEX IF NOT EXISTS idx_waitlist_intervals_req ON waitlist_intervals(request_id)",
         "CREATE INDEX IF NOT EXISTS idx_waitlist_weekdays_req ON waitlist_weekdays(request_id)",
+        "CREATE INDEX IF NOT EXISTS idx_waitlist_schedule_req_day ON waitlist_schedule(request_id, weekday)",
         "CREATE INDEX IF NOT EXISTS idx_holds_slot ON slot_holds(machine_id, date, hour, status)",
         "CREATE INDEX IF NOT EXISTS idx_holds_user ON slot_holds(user_id, status)",
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_holds_one_active_slot ON slot_holds(machine_id, date, hour) WHERE status='active'",
@@ -982,6 +992,46 @@ def ensure_pra4ka2_tables():
                 # auto-generated ids only where the backend supports it. Migrations below
                 # repair the id columns for PostgreSQL installations created from scratch.
                 raise
+
+    # Migrate legacy "weekdays + common intervals" requests into the flexible
+    # per-weekday schedule. This is additive and idempotent, so existing users
+    # keep exactly the same effective availability after the update.
+    with get_conn() as conn:
+        legacy_intervals = conn.execute(
+            "SELECT request_id,start_hour,end_hour FROM waitlist_intervals ORDER BY request_id,start_hour"
+        ).fetchall()
+        legacy_weekdays = conn.execute(
+            "SELECT request_id,weekday FROM waitlist_weekdays ORDER BY request_id,weekday"
+        ).fetchall()
+        scheduled_ids = {
+            int(r[0])
+            for r in conn.execute("SELECT DISTINCT request_id FROM waitlist_schedule").fetchall()
+        }
+
+        intervals_by_request: dict[int, list[tuple[int, int]]] = {}
+        for request_id, start_hour, end_hour in legacy_intervals:
+            intervals_by_request.setdefault(int(request_id), []).append(
+                (int(start_hour), int(end_hour))
+            )
+
+        weekdays_by_request: dict[int, set[int]] = {}
+        for request_id, weekday in legacy_weekdays:
+            weekdays_by_request.setdefault(int(request_id), set()).add(int(weekday))
+
+        for request_id, intervals in intervals_by_request.items():
+            if request_id in scheduled_ids:
+                continue
+            days = sorted(weekdays_by_request.get(request_id) or set(range(7)))
+            for weekday in days:
+                for start_hour, end_hour in intervals:
+                    conn.execute(
+                        """
+                        INSERT INTO waitlist_schedule(request_id,weekday,start_hour,end_hour)
+                        VALUES (?,?,?,?)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        (request_id, weekday, start_hour, end_hour),
+                    )
 
     if DATABASE_URL:
         # INTEGER PRIMARY KEY does not auto-increment in PostgreSQL. Convert the new id
