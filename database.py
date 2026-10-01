@@ -1045,24 +1045,91 @@ def ensure_pra4ka2_tables():
                 (now.isoformat(timespec="seconds"), int(request_id)),
             )
 
-        # One-time repair for a short-lived intermediate deployment that
-        # accidentally reopened historical fulfilled requests at 17:49:04 MSK.
-        # These ids were identified from the production audit immediately
-        # after that deployment; they were not active subscriptions before it.
-        accidental_reactivations = (
+        # Permanent subscriptions became the final product semantics:
+        # receiving/finishing a wash must not destroy the subscription.
+        #
+        # During the rollout at 17:49:04 MSK a group of already-fulfilled
+        # legacy requests was briefly reactivated and then incorrectly marked
+        # cancelled by a repair that still assumed one-shot requests. Restore
+        # only those exact migration-touched rows, and only if the user has not
+        # already created another current persistent subscription. The exact
+        # updated_at marker makes this one-shot: a later intentional cancel is
+        # never undone.
+        legacy_persistent_ids = (
             3, 4, 6, 9, 12, 17, 18, 19, 21, 27, 28, 29, 30, 31,
             33, 36, 41, 42, 43, 46, 49, 53, 57, 58, 90,
         )
-        marks = ",".join("?" for _ in accidental_reactivations)
-        conn.execute(
+        marks = ",".join("?" for _ in legacy_persistent_ids)
+        legacy_rows = conn.execute(
             f"""
-            UPDATE waitlist_requests
-            SET status='cancelled',persistent=0,matched_booking_id=NULL
-            WHERE id IN ({marks})
-              AND created_at < '2026-10-01T00:00:00+03:00'
+            SELECT wr.id,wr.user_id,wr.priority_since
+            FROM waitlist_requests wr
+            WHERE wr.id IN ({marks})
+              AND wr.status='cancelled'
+              AND wr.persistent=0
+              AND wr.updated_at='2026-10-01T17:49:04+03:00'
             """,
-            accidental_reactivations,
-        )
+            legacy_persistent_ids,
+        ).fetchall()
+
+        for request_id, user_id, old_priority in legacy_rows:
+            current = conn.execute(
+                """
+                SELECT 1
+                FROM waitlist_requests
+                WHERE user_id=?
+                  AND persistent=1
+                  AND status IN ('active','matched','paused')
+                  AND id<>?
+                LIMIT 1
+                """,
+                (int(user_id), int(request_id)),
+            ).fetchone()
+            if current:
+                continue
+
+            last_usage = conn.execute(
+                """
+                SELECT occurred_at
+                FROM laundry_usage_history
+                WHERE user_id=?
+                ORDER BY occurred_at DESC
+                LIMIT 1
+                """,
+                (int(user_id),),
+            ).fetchone()
+
+            priority_since = str(old_priority)
+            if last_usage and last_usage[0]:
+                try:
+                    usage_start = datetime.fromisoformat(str(last_usage[0]))
+                    if usage_start.tzinfo is None:
+                        usage_start = usage_start.replace(tzinfo=TZ)
+                    priority_since = (
+                        usage_start + timedelta(hours=1)
+                    ).isoformat(timespec="seconds")
+                except Exception:
+                    pass
+
+            conn.execute(
+                """
+                UPDATE waitlist_requests
+                SET status='active',
+                    persistent=1,
+                    matched_booking_id=NULL,
+                    priority_since=?,
+                    updated_at=?
+                WHERE id=?
+                  AND status='cancelled'
+                  AND persistent=0
+                  AND updated_at='2026-10-01T17:49:04+03:00'
+                """,
+                (
+                    priority_since,
+                    now.isoformat(timespec="seconds"),
+                    int(request_id),
+                ),
+            )
 
         matched_rows = conn.execute(
             """
