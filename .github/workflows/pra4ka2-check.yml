@@ -82,6 +82,13 @@ jobs:
           future = (datetime.now(ZoneInfo(TIMEZONE)).date() + timedelta(days=1)).isoformat()
           result = asyncio.run(bs.create_booking_safe(database.get_user(1001)[0], m1, future, 18))
           assert result.booking_id
-          assert not wl.get_active_request_for_tg(1001)
+          assert wl.get_active_request_for_tg(1001)
+          with database.get_conn() as conn:
+              row = conn.execute(
+                  "SELECT status,matched_booking_id FROM waitlist_requests WHERE id=?",
+                  (rid,),
+              ).fetchone()
+          assert str(row[0]) == "matched"
+          assert int(row[1]) == result.booking_id
           print("postgres functional checks ok")
           PY
