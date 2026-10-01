@@ -1240,15 +1240,14 @@ def get_free_hours_effective(machine_id: int, date_iso: str) -> list[int]:
                 (int(machine_id), str(date_iso)),
             ).fetchall()
         }
-        now_s = datetime.now(TZ).isoformat(timespec="seconds")
         held = {
             int(r[0])
             for r in conn.execute(
                 """
                 SELECT hour FROM slot_holds
-                WHERE machine_id=? AND date=? AND status='active' AND expires_at>?
+                WHERE machine_id=? AND date=? AND status='active'
                 """,
-                (int(machine_id), str(date_iso), now_s),
+                (int(machine_id), str(date_iso)),
             ).fetchall()
         }
     return [h for h in WORKING_HOURS if h not in busy and h not in held]
@@ -1282,9 +1281,9 @@ def get_availability_bulk(date_isos: list[str]):
             SELECT machine_id,date,hour
             FROM slot_holds
             WHERE date IN ({marks})
-              AND status='active' AND expires_at>?
+              AND status='active'
             """,
-            tuple(dates) + (now_s,),
+            tuple(dates),
         ).fetchall()
 
     busy: dict[tuple[int, str], set[int]] = {}
