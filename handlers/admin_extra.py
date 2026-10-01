@@ -298,6 +298,7 @@ async def admin_waitlist(callback: types.CallbackQuery):
 
         ids = [int(r[0]) for r in rows]
         intervals = {}
+        schedules = {}
         machines = {}
         weekdays = {}
         if ids:
@@ -307,6 +308,16 @@ async def admin_waitlist(callback: types.CallbackQuery):
                 tuple(ids),
             ).fetchall():
                 intervals.setdefault(int(rid), []).append((int(a),int(b)))
+            for rid,weekday,a,b in conn.execute(
+                f"""
+                SELECT request_id,weekday,start_hour,end_hour
+                FROM waitlist_schedule
+                WHERE request_id IN ({marks})
+                ORDER BY request_id,weekday,start_hour
+                """,
+                tuple(ids),
+            ).fetchall():
+                schedules.setdefault(int(rid), {}).setdefault(int(weekday), []).append((int(a),int(b)))
             for rid,name in conn.execute(
                 f"""
                 SELECT wm.request_id,m.name
@@ -334,15 +345,27 @@ async def admin_waitlist(callback: types.CallbackQuery):
         su = html.escape(str(_b64d_try(surname) or "-"))
         ro = html.escape(str(_b64d_try(room) or "-"))
         un = f"@{html.escape(str(username))}" if username else "без username"
-        day_values = weekdays.get(int(rid), [])
-        day_text = "любой день" if not day_values else ",".join(WEEKDAY_SHORT[x] for x in day_values)
-        time_text = ", ".join(f"{a:02d}:00-{b:02d}:00" for a,b in intervals.get(int(rid), [])) or "-"
+        request_schedule = schedules.get(int(rid), {})
+        if request_schedule:
+            schedule_parts = []
+            for day in sorted(request_schedule):
+                times = ",".join(
+                    f"{a:02d}:00-{b:02d}:00"
+                    for a,b in request_schedule[day]
+                )
+                schedule_parts.append(f"{WEEKDAY_SHORT[day]} {times}")
+            schedule_text = "; ".join(schedule_parts)
+        else:
+            day_values = weekdays.get(int(rid), [])
+            day_text = "любой день" if not day_values else ",".join(WEEKDAY_SHORT[x] for x in day_values)
+            time_text = ", ".join(f"{a:02d}:00-{b:02d}:00" for a,b in intervals.get(int(rid), [])) or "-"
+            schedule_text = f"{day_text} {time_text}"
         machine_text = "любая" if bool(any_machine) else ", ".join(machines.get(int(rid), [])) or "-"
         mode_text = "AUTO" if str(mode) == "auto" else "спросить"
         lines += [
             "",
             f"<b>{idx}. {su}</b> · комн. {ro} · {un}",
-            f"📆 {day_text} · 🕐 {html.escape(time_text)}",
+            f"📆 {html.escape(schedule_text)}",
             f"🧺 {html.escape(machine_text)} · {mode_text} · с {_fmt_dt(priority_since)}",
         ]
 
