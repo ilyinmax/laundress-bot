@@ -372,10 +372,12 @@ async def admin_waitlist(callback: types.CallbackQuery):
     lines = [
         f"🔔 <b>Подписки: {subscriptions}</b>",
         f"⏳ Сейчас ждут место: {total}",
-        f"✅ Уже имеют запись: {matched_total}",
+        f"✅ Уже имеют запись: {matched_total + paused_total}",
     ]
     if paused_total:
-        lines.append(f"⏸ Приостановлены: {paused_total}")
+        lines.append(
+            f"↳ из них подписка создана при уже существующей записи: {paused_total}"
+        )
     lines.append("")
     lines.append("<b>Сейчас в очереди:</b>")
     if not rows:
