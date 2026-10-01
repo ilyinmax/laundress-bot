@@ -246,7 +246,7 @@ async def show_admin_schedule(callback: types.CallbackQuery):
 # === Удаление конкретной записи ===
 @router.callback_query(F.data.startswith("admin_del_"))
 async def delete_booking(callback: types.CallbackQuery):
-    await callback.answer()  # ← ACK
+    await callback.answer()
     if not is_admin(callback.from_user.id):
         return await callback.answer("🚫 Нет доступа.", show_alert=True)
 
@@ -259,14 +259,113 @@ async def delete_booking(callback: types.CallbackQuery):
     except ValueError:
         return await callback.answer("Неверный ID записи.", show_alert=True)
 
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT b.hour,m.name,u.surname,u.room,u.username
+            FROM bookings b
+            JOIN machines m ON m.id=b.machine_id
+            JOIN users u ON u.id=b.user_id
+            WHERE b.id=?
+            """,
+            (booking_id,),
+        ).fetchone()
+    if not row:
+        return await callback.answer("Запись уже удалена.", show_alert=True)
+
+    hour, machine_name, surname, room, username = row
+    who = _b64d_try(surname) or (f"@{username}" if username else "пользователь")
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(
+                text="🛠 Удалить, оставить слот свободным",
+                callback_data=f"admin_delmanual_{booking_id}_{date}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="🔄 Удалить и отдать очереди",
+                callback_data=f"admin_delqueue_{booking_id}_{date}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
+                text="⬅️ Назад",
+                callback_data=f"admin_day_{date}",
+            )
+        ],
+    ])
+    await callback.message.edit_text(
+        "⚠️ <b>Как удалить запись?</b>\n\n"
+        f"🧺 {machine_name}\n"
+        f"⏰ {int(hour):02d}:00\n"
+        f"👤 {who}\n\n"
+        "Если хотите сразу записать другого человека, оставьте слот свободным. "
+        "Если это обычная отмена, можно сразу отдать место листу ожидания.",
+        parse_mode="HTML",
+        reply_markup=kb,
+    )
+
+
+async def _admin_delete_booking(
+    callback: types.CallbackQuery,
+    booking_id: int,
+    date: str,
+    *,
+    redistribute: bool,
+) -> None:
     try:
-        old = await cancel_booking_safe(booking_id, require_future=False)
+        old = await cancel_booking_safe(int(booking_id), require_future=False)
     except Exception:
         return await callback.answer("Запись уже удалена.", show_alert=True)
 
-    from waitlist_service import distribute_date
-    await distribute_date(old.date, context="day")
+    if redistribute:
+        from waitlist_service import distribute_date
+        await distribute_date(old.date, context="day")
+
+    await callback.answer(
+        "Удалено и передано очереди."
+        if redistribute
+        else "Удалено. Слот оставлен свободным для ручной записи.",
+        show_alert=True,
+    )
     await _render_schedule(callback.message, date)
+
+
+@router.callback_query(F.data.startswith("admin_delmanual_"))
+async def delete_booking_keep_free(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("🚫 Нет доступа.", show_alert=True)
+    try:
+        payload = callback.data.removeprefix("admin_delmanual_")
+        booking_id_s, date = payload.split("_", 1)
+        booking_id = int(booking_id_s)
+    except Exception:
+        return await callback.answer("Ошибка данных.", show_alert=True)
+    await _admin_delete_booking(
+        callback,
+        booking_id,
+        date,
+        redistribute=False,
+    )
+
+
+@router.callback_query(F.data.startswith("admin_delqueue_"))
+async def delete_booking_and_redistribute(callback: types.CallbackQuery):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("🚫 Нет доступа.", show_alert=True)
+    try:
+        payload = callback.data.removeprefix("admin_delqueue_")
+        booking_id_s, date = payload.split("_", 1)
+        booking_id = int(booking_id_s)
+    except Exception:
+        return await callback.answer("Ошибка данных.", show_alert=True)
+    await _admin_delete_booking(
+        callback,
+        booking_id,
+        date,
+        redistribute=True,
+    )
 
 
 # === Бан пользователя ===
