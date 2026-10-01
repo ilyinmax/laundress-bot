@@ -1017,7 +1017,7 @@ def ensure_pra4ka2_tables():
         # These ids were identified from the production audit immediately
         # after that deployment; they were not active subscriptions before it.
         accidental_reactivations = (
-            4, 6, 9, 12, 17, 18, 19, 21, 27, 28, 29, 30, 31,
+            3, 4, 6, 9, 12, 17, 18, 19, 21, 27, 28, 29, 30, 31,
             33, 36, 41, 42, 43, 46, 49, 53, 57, 58, 90,
         )
         marks = ",".join("?" for _ in accidental_reactivations)
