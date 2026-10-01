@@ -608,6 +608,128 @@ class Pra4ka2Tests(unittest.TestCase):
         )
 
 
+    def test_subscription_reactivates_after_successful_wash_with_new_priority(self):
+        import booking_service as bs
+        import waitlist_service as wl
+
+        future = (datetime.now(TZ).date() + timedelta(days=1)).isoformat()
+        uid = self.uid(1001)
+        mid = self.mid("Стиральная №1")
+
+        request_id = wl.save_request(1001, [(10, 12)], [mid], False, "auto")
+        old_priority = "2026-09-20T12:00:00+03:00"
+        with database.get_conn() as conn:
+            conn.execute(
+                "UPDATE waitlist_requests SET priority_since=? WHERE id=?",
+                (old_priority, request_id),
+            )
+
+        booking = asyncio.run(bs.create_booking_safe(uid, mid, future, 10))
+        with database.get_conn() as conn:
+            matched = conn.execute(
+                "SELECT status,matched_booking_id,priority_since FROM waitlist_requests WHERE id=?",
+                (request_id,),
+            ).fetchone()
+        self.assertEqual(str(matched[0]), "matched")
+        self.assertEqual(int(matched[1]), booking.booking_id)
+        self.assertEqual(str(matched[2]), old_priority)
+
+        finish = wl._booking_end(future, 10)
+        reactivated = asyncio.run(
+            wl.resume_subscription_after_wash(
+                request_id,
+                booking.booking_id,
+                now=finish + timedelta(seconds=1),
+                redistribute=False,
+            )
+        )
+        self.assertTrue(reactivated)
+
+        with database.get_conn() as conn:
+            active = conn.execute(
+                "SELECT status,matched_booking_id,priority_since FROM waitlist_requests WHERE id=?",
+                (request_id,),
+            ).fetchone()
+        self.assertEqual(str(active[0]), "active")
+        self.assertIsNone(active[1])
+        self.assertEqual(str(active[2]), finish.isoformat(timespec="seconds"))
+
+
+    def test_subscription_created_during_existing_booking_starts_priority_after_wash(self):
+        import booking_service as bs
+        import waitlist_service as wl
+
+        future = (datetime.now(TZ).date() + timedelta(days=1)).isoformat()
+        uid = self.uid(1001)
+        mid = self.mid("Стиральная №1")
+        booking = asyncio.run(bs.create_booking_safe(uid, mid, future, 10))
+
+        request_id = wl.save_request(
+            1001,
+            [(18, 20)],
+            [],
+            True,
+            "notify",
+        )
+        finish = wl._booking_end(future, 10)
+
+        with database.get_conn() as conn:
+            paused = conn.execute(
+                "SELECT status,priority_since FROM waitlist_requests WHERE id=?",
+                (request_id,),
+            ).fetchone()
+        self.assertEqual(str(paused[0]), "paused")
+        self.assertEqual(str(paused[1]), finish.isoformat(timespec="seconds"))
+
+        reactivated = asyncio.run(
+            wl.resume_subscription_after_wash(
+                request_id,
+                booking.booking_id,
+                now=finish + timedelta(seconds=1),
+                redistribute=False,
+            )
+        )
+        self.assertTrue(reactivated)
+
+        with database.get_conn() as conn:
+            active = conn.execute(
+                "SELECT status,priority_since FROM waitlist_requests WHERE id=?",
+                (request_id,),
+            ).fetchone()
+        self.assertEqual(str(active[0]), "active")
+        self.assertEqual(str(active[1]), finish.isoformat(timespec="seconds"))
+
+
+    def test_cancelling_preexisting_booking_activates_paused_subscription_now(self):
+        import booking_service as bs
+        import waitlist_service as wl
+
+        future = (datetime.now(TZ).date() + timedelta(days=1)).isoformat()
+        uid = self.uid(1001)
+        mid = self.mid("Стиральная №1")
+        booking = asyncio.run(bs.create_booking_safe(uid, mid, future, 10))
+        request_id = wl.save_request(1001, [(18, 20)], [], True, "auto")
+
+        before = datetime.now(TZ).replace(microsecond=0)
+        cancelled = asyncio.run(bs.cancel_booking_safe(booking.booking_id))
+        after = datetime.now(TZ).replace(microsecond=0)
+        self.assertTrue(cancelled.waitlist_reopened)
+
+        with database.get_conn() as conn:
+            active = conn.execute(
+                "SELECT status,matched_booking_id,priority_since FROM waitlist_requests WHERE id=?",
+                (request_id,),
+            ).fetchone()
+        priority = datetime.fromisoformat(str(active[2]))
+        if priority.tzinfo is None:
+            priority = priority.replace(tzinfo=TZ)
+
+        self.assertEqual(str(active[0]), "active")
+        self.assertIsNone(active[1])
+        self.assertGreaterEqual(priority, before)
+        self.assertLessEqual(priority, after)
+
+
     def test_same_surname_room_accounts_stay_independent(self):
         import waitlist_service as wl
 
@@ -639,7 +761,7 @@ class Pra4ka2Tests(unittest.TestCase):
         self.assertEqual(scores[first_uid], 4)
         self.assertEqual(scores[second_uid], 0)
 
-    def test_future_booking_blocks_only_same_account_waitlist(self):
+    def test_future_booking_pauses_only_same_account_subscription(self):
         import booking_service as bs
         import waitlist_service as wl
 
@@ -648,13 +770,35 @@ class Pra4ka2Tests(unittest.TestCase):
         mid = self.mid("Стиральная №1")
 
         first_uid = self.uid(1001)
-        asyncio.run(bs.create_booking_safe(first_uid, mid, future, 10))
+        booking = asyncio.run(bs.create_booking_safe(first_uid, mid, future, 10))
 
-        with self.assertRaises(ValueError):
-            wl.save_request(1001, [(18, 20)], [], True, "auto")
-
+        first = wl.save_request(1001, [(18, 20)], [], True, "auto")
         second = wl.save_request(2001, [(18, 20)], [], True, "auto")
+        self.assertTrue(first)
         self.assertTrue(second)
+
+        with database.get_conn() as conn:
+            paused = conn.execute(
+                """
+                SELECT status,matched_booking_id,priority_since
+                FROM waitlist_requests WHERE id=?
+                """,
+                (first,),
+            ).fetchone()
+            active = conn.execute(
+                "SELECT status FROM waitlist_requests WHERE id=?",
+                (second,),
+            ).fetchone()
+
+        expected_start = wl._booking_end(future, 10).isoformat(timespec="seconds")
+        self.assertEqual(str(paused[0]), "paused")
+        self.assertEqual(int(paused[1]), booking.booking_id)
+        self.assertEqual(str(paused[2]), expected_start)
+        self.assertEqual(str(active[0]), "active")
+        self.assertNotIn(first, {r.id for r in wl._active_requests()})
+
+        wl.cancel_request_for_tg(1001)
+        wl.cancel_request_for_tg(2001)
 
     def test_hold_acceptance_is_idempotent(self):
         import waitlist_service as wl
