@@ -284,6 +284,12 @@ async def delete_booking(callback: types.CallbackQuery):
         ],
         [
             InlineKeyboardButton(
+                text="👤 Удалить и записать другого",
+                callback_data=f"admin_replace_{booking_id}_{date}",
+            )
+        ],
+        [
+            InlineKeyboardButton(
                 text="🔄 Удалить и отдать очереди",
                 callback_data=f"admin_delqueue_{booking_id}_{date}",
             )
@@ -300,8 +306,9 @@ async def delete_booking(callback: types.CallbackQuery):
         f"🧺 {machine_name}\n"
         f"⏰ {int(hour):02d}:00\n"
         f"👤 {who}\n\n"
-        "Если хотите сразу записать другого человека, оставьте слот свободным. "
-        "Если это обычная отмена, можно сразу отдать место листу ожидания.",
+        "Если хотите записать другого человека, выберите переназначение: "
+        "слот останется занят старой записью до самого подтверждения. "
+        "Для ручной работы можно оставить слот свободным, а при обычной отмене - сразу отдать его листу ожидания.",
         parse_mode="HTML",
         reply_markup=kb,
     )
