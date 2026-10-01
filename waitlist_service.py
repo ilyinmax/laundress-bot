@@ -384,6 +384,28 @@ def _cancel_hold_expiry(hold_id: int) -> None:
     _remove_job(f"waitlist_hold_{int(hold_id)}")
 
 
+def _night_hold_job_id(date_iso: str) -> str:
+    return f"waitlist_night_holds_{str(date_iso)}"
+
+
+def _schedule_night_hold_phase(date_iso: str, run_at: datetime) -> None:
+    from apscheduler.triggers.date import DateTrigger
+    from scheduler import scheduler
+
+    now = datetime.now(TZ)
+    if run_at <= now:
+        run_at = now + timedelta(seconds=1)
+
+    scheduler.add_job(
+        process_night_hold_phase,
+        trigger=DateTrigger(run_date=run_at),
+        id=_night_hold_job_id(str(date_iso)),
+        args=[str(date_iso)],
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+
 def schedule_next_pending_notification() -> None:
     """Schedule one exact wake-up for the earliest unsent midnight notification."""
     from apscheduler.triggers.date import DateTrigger
@@ -427,14 +449,36 @@ async def rebuild_waitlist_jobs() -> None:
     with get_conn() as conn:
         holds = conn.execute(
             """
-            SELECT id,expires_at
+            SELECT id,expires_at,context,created_at
             FROM slot_holds
             WHERE status='active'
             ORDER BY expires_at
             """
         ).fetchall()
 
-    for hold_id, expires_at in holds:
+    for hold_id, expires_at, context, created_at in holds:
+        # A Render restart can consume most or all of a two-minute night HOLD.
+        # Give the user a fresh two-minute response window after startup instead
+        # of treating infrastructure downtime as a refusal.
+        if str(context) == "night":
+            created = _dt(created_at)
+            if now - created <= timedelta(minutes=10):
+                restored_expiry = now + timedelta(minutes=HOLD_MINUTES)
+                with get_conn() as conn:
+                    conn.execute(
+                        """
+                        UPDATE slot_holds
+                        SET expires_at=?
+                        WHERE id=? AND status='active'
+                        """,
+                        (
+                            restored_expiry.isoformat(timespec="seconds"),
+                            int(hold_id),
+                        ),
+                    )
+                _schedule_hold_expiry(int(hold_id), restored_expiry)
+                continue
+
         if _dt(expires_at) <= now:
             await expire_hold(int(hold_id))
         else:
@@ -1239,14 +1283,24 @@ async def _create_hold(
             conn.execute("UPDATE slot_holds SET status='expired' WHERE id=?", (hold_id,))
 
 
-async def distribute_date(date_iso: str, *, context: str = "day") -> int:
+async def distribute_date(
+    date_iso: str,
+    *,
+    context: str = "day",
+    phase: str = "all",
+) -> int:
     if not WAITLIST_ENABLED:
         return 0
     async with _DISTRIBUTION_LOCK:
-        return await _distribute_date_locked(date_iso, context=context)
+        return await _distribute_date_locked(date_iso, context=context, phase=phase)
 
 
-async def _distribute_date_locked(date_iso: str, *, context: str = "day") -> int:
+async def _distribute_date_locked(
+    date_iso: str,
+    *,
+    context: str = "day",
+    phase: str = "all",
+) -> int:
     # Keep 30-day fairness data current only when matching is actually needed.
     record_usage_history()
     cutoff_at = None
@@ -1281,7 +1335,14 @@ async def _distribute_date_locked(date_iso: str, *, context: str = "day") -> int
     count = 0
     for rid, (mid, hour) in matches.items():
         req = by_id[rid]
-        if req.mode == "auto" and _auto_booking_allowed(date_iso, hour):
+
+        wants_auto = req.mode == "auto" and _auto_booking_allowed(date_iso, hour)
+        if phase == "auto" and not wants_auto:
+            continue
+        if phase == "holds" and wants_auto:
+            continue
+
+        if wants_auto:
             try:
                 result = await create_booking_safe(req.user_id, mid, date_iso, hour)
             except BookingError:
@@ -1299,35 +1360,121 @@ async def _distribute_date_locked(date_iso: str, *, context: str = "day") -> int
                 urgent_auto=req.mode == "auto",
             )
             count += 1
+
     if context == "day":
         await offer_earlier_for_date(date_iso)
     return count
 
 
 async def process_night_round() -> None:
+    """
+    Night distribution has two durable phases.
+
+    23:00: AUTO winners are committed first.
+    ~23:01:30: HOLD offers are created only after the service has had time to
+    recover from a Render recycle. If a restart happens in between, startup
+    resumes from the persisted round status instead of restarting HOLD timers.
+    """
     if not WAITLIST_ENABLED:
         return
+
     now = datetime.now(TZ)
     target = (now.date() + timedelta(days=3)).isoformat()
     cutoff = now.replace(hour=23, minute=0, second=0, microsecond=0)
+    hold_run_at = cutoff + timedelta(seconds=90)
+
     with get_conn() as conn:
-        row = conn.execute("SELECT status FROM waitlist_rounds WHERE target_date=?", (target,)).fetchone()
-        if row and str(row[0]) == "finished":
+        row = conn.execute(
+            "SELECT status,cutoff_at FROM waitlist_rounds WHERE target_date=?",
+            (target,),
+        ).fetchone()
+
+    if row:
+        status = str(row[0])
+        stored_cutoff = _dt(row[1]) if row[1] else cutoff
+        if status == "finished":
             return
+        if status in {"holds_pending", "holds_running"}:
+            _schedule_night_hold_phase(
+                target,
+                max(stored_cutoff + timedelta(seconds=90), now + timedelta(seconds=1)),
+            )
+            return
+        cutoff = stored_cutoff
+        hold_run_at = cutoff + timedelta(seconds=90)
+
+    with get_conn() as conn:
         conn.execute(
             """
             INSERT INTO waitlist_rounds(target_date,cutoff_at,started_at,status)
-            VALUES (?,?,?,'running')
-            ON CONFLICT(target_date) DO UPDATE SET started_at=excluded.started_at,status='running'
+            VALUES (?,?,?,'auto_running')
+            ON CONFLICT(target_date) DO UPDATE SET
+                cutoff_at=excluded.cutoff_at,
+                started_at=COALESCE(waitlist_rounds.started_at, excluded.started_at),
+                status='auto_running'
             """,
-            (target, cutoff.isoformat(timespec="seconds"), now.isoformat(timespec="seconds")),
+            (
+                target,
+                cutoff.isoformat(timespec="seconds"),
+                now.isoformat(timespec="seconds"),
+            ),
         )
-    await distribute_date(target, context="night")
+
+    # Run AUTO against the full fairness matching, but do not start HOLD timers yet.
+    # Repeat because committing AUTO winners can expose another AUTO winner after
+    # the selected users disappear from the active candidate set.
+    for _ in range(len(WORKING_HOURS) + 1):
+        created = await distribute_date(target, context="night", phase="auto")
+        if created == 0:
+            break
+
     with get_conn() as conn:
         conn.execute(
-            "UPDATE waitlist_rounds SET status='finished',finished_at=? WHERE target_date=?",
-            (datetime.now(TZ).isoformat(timespec="seconds"), target),
+            "UPDATE waitlist_rounds SET status='holds_pending' WHERE target_date=?",
+            (target,),
         )
+
+    _schedule_night_hold_phase(target, hold_run_at)
+
+
+async def process_night_hold_phase(date_iso: str) -> None:
+    if not WAITLIST_ENABLED:
+        return
+
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT status FROM waitlist_rounds WHERE target_date=?",
+            (str(date_iso),),
+        ).fetchone()
+        if row and str(row[0]) == "finished":
+            return
+        conn.execute(
+            "UPDATE waitlist_rounds SET status='holds_running' WHERE target_date=?",
+            (str(date_iso),),
+        )
+
+    # One final AUTO drain protects against changes during the 90-second gap.
+    for _ in range(len(WORKING_HOURS) + 1):
+        created = await distribute_date(str(date_iso), context="night", phase="auto")
+        if created == 0:
+            break
+
+    await distribute_date(str(date_iso), context="night", phase="holds")
+
+    with get_conn() as conn:
+        conn.execute(
+            """
+            UPDATE waitlist_rounds
+            SET status='finished',finished_at=?
+            WHERE target_date=?
+            """,
+            (
+                datetime.now(TZ).isoformat(timespec="seconds"),
+                str(date_iso),
+            ),
+        )
+
+    _remove_job(_night_hold_job_id(str(date_iso)))
     schedule_next_pending_notification()
 
 
