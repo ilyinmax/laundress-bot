@@ -190,7 +190,7 @@ def sync_subscription_pause_for_user(user_id: int) -> None:
             """
             SELECT id,status,priority_since
             FROM waitlist_requests
-            WHERE user_id=? AND status IN ('active','matched','paused')
+            WHERE user_id=? AND persistent=1 AND status IN ('active','matched','paused')
             ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'paused' THEN 1 ELSE 2 END,
                      updated_at DESC
             LIMIT 1
@@ -261,7 +261,7 @@ async def resume_subscription_after_wash(
             SELECT wr.user_id,wr.status,wr.matched_booking_id,b.date,b.hour
             FROM waitlist_requests wr
             LEFT JOIN bookings b ON b.id=wr.matched_booking_id
-            WHERE wr.id=? AND wr.status IN ('matched','paused')
+            WHERE wr.id=? AND wr.persistent=1 AND wr.status IN ('matched','paused')
             """,
             (int(request_id),),
         ).fetchone()
@@ -446,7 +446,7 @@ async def rebuild_waitlist_jobs() -> None:
             SELECT wr.id,wr.matched_booking_id,b.date,b.hour
             FROM waitlist_requests wr
             LEFT JOIN bookings b ON b.id=wr.matched_booking_id
-            WHERE wr.status IN ('matched','paused')
+            WHERE wr.persistent=1 AND wr.status IN ('matched','paused')
             """
         ).fetchall()
 
@@ -486,7 +486,8 @@ def get_active_request_for_tg(tg_id: int):
             SELECT wr.id,wr.mode,wr.any_machine,wr.created_at,wr.priority_since
             FROM waitlist_requests wr
             JOIN users u ON u.id=wr.user_id
-            WHERE u.tg_id=? AND wr.status IN ('active','matched','paused')
+            WHERE u.tg_id=? AND wr.persistent=1
+              AND wr.status IN ('active','matched','paused')
             ORDER BY CASE wr.status WHEN 'active' THEN 0 WHEN 'paused' THEN 1 ELSE 2 END,
                      wr.updated_at DESC
             LIMIT 1
@@ -524,7 +525,8 @@ def cancel_request_for_tg(tg_id: int) -> bool:
             """
             SELECT wr.id FROM waitlist_requests wr
             JOIN users u ON u.id=wr.user_id
-            WHERE u.tg_id=? AND wr.status IN ('active','matched','paused')
+            WHERE u.tg_id=? AND wr.persistent=1
+              AND wr.status IN ('active','matched','paused')
             """,
             (int(tg_id),),
         ).fetchall()
@@ -644,7 +646,8 @@ def save_request(
             """
             SELECT id,mode,any_machine,priority_since,status,matched_booking_id
             FROM waitlist_requests
-            WHERE user_id=? AND status IN ('active','matched','paused')
+            WHERE user_id=? AND persistent=1
+              AND status IN ('active','matched','paused')
             ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'paused' THEN 1 ELSE 2 END,
                      updated_at DESC
             """,
@@ -713,7 +716,8 @@ def save_request(
             conn.execute(
                 """
                 UPDATE waitlist_requests
-                SET mode=?,status=?,any_machine=?,priority_since=?,matched_booking_id=?,updated_at=?
+                SET mode=?,status=?,any_machine=?,priority_since=?,matched_booking_id=?,
+                    persistent=1,updated_at=?
                 WHERE id=?
                 """,
                 (
@@ -752,8 +756,8 @@ def save_request(
             cur = conn.execute(
                 """
                 INSERT INTO waitlist_requests
-                (user_id,mode,status,any_machine,created_at,priority_since,matched_booking_id,updated_at)
-                VALUES (?,?,?,?,?,?,?,?)
+                (user_id,mode,status,any_machine,created_at,priority_since,matched_booking_id,persistent,updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     user_id,
@@ -763,6 +767,7 @@ def save_request(
                     now_s,
                     priority_since,
                     matched_booking_id,
+                    1,
                     now_s,
                 ),
             )
@@ -771,7 +776,8 @@ def save_request(
                 request_id = int(conn.execute(
                     """
                     SELECT id FROM waitlist_requests
-                    WHERE user_id=? AND status IN ('active','matched','paused')
+                    WHERE user_id=? AND persistent=1
+                      AND status IN ('active','matched','paused')
                     ORDER BY updated_at DESC LIMIT 1
                     """,
                     (user_id,),
@@ -831,7 +837,7 @@ def _active_requests(cutoff_at: str | None = None) -> list[Request]:
                 SELECT wr.id,wr.user_id,u.tg_id,wr.mode,wr.any_machine,wr.priority_since
                 FROM waitlist_requests wr
                 JOIN users u ON u.id=wr.user_id
-                WHERE wr.status='active' AND wr.priority_since<=?
+                WHERE wr.status='active' AND wr.persistent=1 AND wr.priority_since<=?
                 ORDER BY wr.priority_since
                 """,
                 (str(cutoff_at),),
@@ -842,7 +848,7 @@ def _active_requests(cutoff_at: str | None = None) -> list[Request]:
                 SELECT wr.id,wr.user_id,u.tg_id,wr.mode,wr.any_machine,wr.priority_since
                 FROM waitlist_requests wr
                 JOIN users u ON u.id=wr.user_id
-                WHERE wr.status='active'
+                WHERE wr.status='active' AND wr.persistent=1
                 ORDER BY wr.priority_since
                 """
             ).fetchall()
@@ -988,7 +994,7 @@ async def check_active_waitlist() -> int:
 
     with get_conn() as conn:
         active = conn.execute(
-            "SELECT 1 FROM waitlist_requests WHERE status='active' LIMIT 1"
+            "SELECT 1 FROM waitlist_requests WHERE status='active' AND persistent=1 LIMIT 1"
         ).fetchone()
     if not active:
         return 0
