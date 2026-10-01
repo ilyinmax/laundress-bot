@@ -413,6 +413,34 @@ class Pra4ka2Tests(unittest.TestCase):
         ))
 
 
+    def test_expired_but_still_active_hold_remains_busy_until_expiry_job_finishes(self):
+        import database
+
+        future = (datetime.now(TZ).date() + timedelta(days=1)).isoformat()
+        uid = self.uid(1001)
+        mid = self.mid("Стиральная №1")
+        with database.get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO slot_holds
+                (request_id,user_id,machine_id,date,hour,expires_at,context,status,created_at)
+                VALUES (NULL,?,?,?,?,?,'night','active',?)
+                """,
+                (
+                    uid,
+                    mid,
+                    future,
+                    10,
+                    (datetime.now(TZ) - timedelta(seconds=5)).isoformat(timespec="seconds"),
+                    datetime.now(TZ).isoformat(timespec="seconds"),
+                ),
+            )
+
+        # The slot becomes free only when expire_hold changes status away from
+        # active. This closes the small race between simultaneous HOLD jobs.
+        self.assertNotIn(10, database.get_free_hours_effective(mid, future))
+
+
     def test_waitlist_interval_ui_uses_last_possible_start(self):
         from handlers import pra4ka2 as ui
 
