@@ -1176,6 +1176,7 @@ async def _create_hold(
             INSERT INTO slot_holds
             (request_id,user_id,machine_id,date,hour,expires_at,context,status,created_at)
             VALUES (?,?,?,?,?,?,?,'active',?)
+            ON CONFLICT DO NOTHING
             """,
             (
                 req.id, req.user_id, machine_id, date_iso, hour,
@@ -1185,14 +1186,20 @@ async def _create_hold(
         )
         hold_id = getattr(cur, "lastrowid", None)
         if not hold_id:
-            hold_id = int(conn.execute(
+            row = conn.execute(
                 """
                 SELECT id FROM slot_holds
                 WHERE request_id=? AND machine_id=? AND date=? AND hour=? AND status='active'
                 ORDER BY id DESC LIMIT 1
                 """,
                 (req.id, machine_id, date_iso, hour),
-            ).fetchone()[0])
+            ).fetchone()
+            if not row:
+                # Another worker/process won the same slot or the same user
+                # already received another HOLD. The database constraint is
+                # the final authority, so simply skip this stale match.
+                return
+            hold_id = int(row[0])
 
     full_hold = expires >= now + timedelta(minutes=HOLD_MINUTES)
     hold_text = (
