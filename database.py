@@ -873,6 +873,7 @@ def ensure_pra4ka2_tables():
             created_at TEXT NOT NULL,
             priority_since TEXT NOT NULL,
             matched_booking_id INTEGER,
+            persistent INTEGER NOT NULL DEFAULT 0,
             updated_at TEXT NOT NULL
         )
         """,
@@ -992,6 +993,47 @@ def ensure_pra4ka2_tables():
                 # auto-generated ids only where the backend supports it. Migrations below
                 # repair the id columns for PostgreSQL installations created from scratch.
                 raise
+
+    # Persistent subscriptions were introduced after the original one-shot
+    # waitlist. Mark only subscriptions that are still meaningfully current:
+    # active requests and matched requests whose wash has not finished yet.
+    # Historical fulfilled requests stay non-persistent so they cannot suddenly
+    # come back to life after this deployment.
+    with get_conn() as conn:
+        try:
+            conn.execute(
+                "ALTER TABLE waitlist_requests ADD COLUMN persistent INTEGER NOT NULL DEFAULT 0"
+            )
+        except Exception:
+            pass
+
+        now = datetime.now(TZ)
+        conn.execute(
+            "UPDATE waitlist_requests SET persistent=1 WHERE status='active'"
+        )
+        matched_rows = conn.execute(
+            """
+            SELECT wr.id,b.date,b.hour
+            FROM waitlist_requests wr
+            JOIN bookings b ON b.id=wr.matched_booking_id
+            JOIN machines m ON m.id=b.machine_id
+            WHERE wr.status='matched' AND m.type='wash'
+            """
+        ).fetchall()
+        for request_id, date_value, hour in matched_rows:
+            ds = date_value.isoformat() if hasattr(date_value, "isoformat") else str(date_value)
+            try:
+                d = datetime.fromisoformat(ds).date()
+                finish = datetime.combine(
+                    d, datetime.min.time(), tzinfo=TZ
+                ).replace(hour=int(hour)) + timedelta(hours=1)
+            except Exception:
+                continue
+            if finish > now:
+                conn.execute(
+                    "UPDATE waitlist_requests SET persistent=1 WHERE id=?",
+                    (int(request_id),),
+                )
 
     # Migrate legacy "weekdays + common intervals" requests into the flexible
     # per-weekday schedule. This is additive and idempotent, so existing users
