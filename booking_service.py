@@ -458,6 +458,76 @@ async def cancel_booking_safe(
             _close_transaction(conn, raw)
 
 
+async def reassign_booking_safe(
+    current_booking_id: int,
+    new_user_id: int,
+) -> tuple[BookingResult, BookingResult]:
+    """
+    Atomically replace the owner of a future booking.
+
+    The old booking remains visible until the transaction commits, so the slot
+    is never free for ordinary booking or waitlist redistribution.
+    """
+    async with _BOOKING_LOCK:
+        conn = get_conn()
+        raw = _begin(conn)
+        try:
+            row = conn.execute(
+                """
+                SELECT b.id,b.user_id,b.machine_id,m.type,m.name,b.date,b.hour
+                FROM bookings b
+                JOIN machines m ON m.id=b.machine_id
+                WHERE b.id=?
+                """,
+                (int(current_booking_id),),
+            ).fetchone()
+            if not row:
+                raise InvalidBooking("Исходная запись не найдена")
+
+            old = _booking_from_row(row)
+            if slot_datetime(old.date, old.hour) <= datetime.now(TZ):
+                raise InvalidBooking("Начавшуюся запись переназначить нельзя")
+            if int(old.user_id) == int(new_user_id):
+                raise InvalidBooking("Этот человек уже владелец записи")
+
+            new = _insert_booking(
+                conn,
+                int(new_user_id),
+                int(old.machine_id),
+                str(old.date),
+                int(old.hour),
+                allowed_hold_id=None,
+                close_waitlist=False,
+                ignore_booking_id=int(current_booking_id),
+            )
+            conn.execute(
+                "DELETE FROM bookings WHERE id=?",
+                (int(current_booking_id),),
+            )
+            _commit(raw)
+
+            if old.machine_type == "wash":
+                try:
+                    from waitlist_service import sync_subscription_pause_for_user
+                    # Old owner loses the booking and may return to the queue.
+                    sync_subscription_pause_for_user(int(old.user_id))
+                    # New owner now has a future wash, so their subscription
+                    # must pause/match against the replacement booking.
+                    sync_subscription_pause_for_user(int(new.user_id))
+                except Exception:
+                    pass
+
+            return old, new
+        except BookingError:
+            _rollback(raw)
+            raise
+        except Exception as exc:
+            _rollback(raw)
+            raise SlotBusy("Не удалось безопасно переназначить запись") from exc
+        finally:
+            _close_transaction(conn, raw)
+
+
 async def move_booking_safe(
     current_booking_id: int,
     new_machine_id: int,
