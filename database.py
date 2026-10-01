@@ -1012,6 +1012,39 @@ def ensure_pra4ka2_tables():
             "UPDATE waitlist_requests SET persistent=1 WHERE status='active'"
         )
 
+        # One-time repair for subscriptions that were still tied to a future
+        # wash but were temporarily classified as historical during the
+        # persistent-subscription rollout. Restore the same request row so its
+        # original created_at and priority_since are preserved.
+        current_date = now.date().isoformat()
+        future_linked_cancelled = conn.execute(
+            """
+            SELECT wr.id
+            FROM waitlist_requests wr
+            JOIN bookings b ON b.id=wr.matched_booking_id
+            JOIN machines m ON m.id=b.machine_id
+            WHERE wr.status='cancelled'
+              AND wr.persistent=0
+              AND m.type='wash'
+              AND wr.updated_at>='2026-10-01T17:53:45+03:00'
+              AND wr.updated_at<'2026-10-01T17:54:00+03:00'
+              AND (
+                    b.date > ?
+                 OR (b.date=? AND b.hour>=?)
+              )
+            """,
+            (current_date, current_date, now.hour),
+        ).fetchall()
+        for (request_id,) in future_linked_cancelled:
+            conn.execute(
+                """
+                UPDATE waitlist_requests
+                SET status='matched',persistent=1,updated_at=?
+                WHERE id=? AND status='cancelled' AND persistent=0
+                """,
+                (now.isoformat(timespec="seconds"), int(request_id)),
+            )
+
         # One-time repair for a short-lived intermediate deployment that
         # accidentally reopened historical fulfilled requests at 17:49:04 MSK.
         # These ids were identified from the production audit immediately
