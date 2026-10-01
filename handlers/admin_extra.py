@@ -22,7 +22,12 @@ from database import (
     is_admin,
 )
 from zoneinfo import ZoneInfo
-from booking_service import create_booking_safe, BookingError
+from booking_service import (
+    create_booking_safe,
+    reassign_booking_safe,
+    BookingError,
+    DailyLimit,
+)
 
 TZ = ZoneInfo(TIMEZONE)
 router = Router()
@@ -43,6 +48,7 @@ class EarlyBooking(StatesGroup):
     choosing_machine = State()
     choosing_hour = State()
     confirming = State()
+    replacement_confirming = State()
 
 
 def _admin_menu() -> InlineKeyboardMarkup:
@@ -420,6 +426,71 @@ async def early_target_self(callback: types.CallbackQuery, state: FSMContext):
     await _show_calendar(callback.message, state)
 
 
+@router.callback_query(F.data.startswith("admin_replace_"))
+async def admin_replace_booking(callback: types.CallbackQuery, state: FSMContext):
+    await callback.answer()
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("🚫 Нет доступа.", show_alert=True)
+
+    try:
+        payload = callback.data.removeprefix("admin_replace_")
+        booking_id_s, schedule_date = payload.split("_", 1)
+        booking_id = int(booking_id_s)
+    except Exception:
+        return await callback.answer("Ошибка данных записи.", show_alert=True)
+
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT b.id,b.user_id,b.date,b.hour,m.id,m.type,m.name,
+                   u.surname,u.room,u.username
+            FROM bookings b
+            JOIN machines m ON m.id=b.machine_id
+            JOIN users u ON u.id=b.user_id
+            WHERE b.id=?
+            """,
+            (booking_id,),
+        ).fetchone()
+    if not row:
+        return await callback.answer("Запись уже удалена.", show_alert=True)
+
+    (
+        _bid, old_user_id, date_iso, hour, machine_id, machine_type,
+        machine_name, old_surname, old_room, old_username,
+    ) = row
+
+    await state.clear()
+    await state.update_data(
+        replacement_booking_id=int(booking_id),
+        replacement_schedule_date=str(schedule_date),
+        replacement_old_user_id=int(old_user_id),
+        replacement_old_surname=_b64d_try(old_surname),
+        replacement_old_room=_b64d_try(old_room),
+        replacement_old_username=str(old_username) if old_username else "",
+        replacement_date=str(date_iso),
+        replacement_hour=int(hour),
+        replacement_machine_id=int(machine_id),
+        replacement_machine_type=str(machine_type),
+        replacement_machine_name=str(machine_name),
+    )
+    await state.set_state(EarlyBooking.other_person)
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отмена", callback_data="early_cancel")]
+    ])
+    await callback.message.edit_text(
+        "👤 <b>Кого записать вместо текущего пользователя?</b>\n\n"
+        f"📅 {str(date_iso)}\n"
+        f"⏰ {int(hour):02d}:00\n"
+        f"{'🧺' if str(machine_type) == 'wash' else '🌬️'} {machine_name}\n\n"
+        "Введите фамилию и комнату одним сообщением.\n"
+        "Например: <code>Иванов 412</code>\n\n"
+        "До подтверждения старая запись остаётся на месте.",
+        reply_markup=kb,
+        parse_mode="HTML",
+    )
+
+
 @router.callback_query(F.data == "early_target_other")
 async def early_target_other(callback: types.CallbackQuery, state: FSMContext):
     await callback.answer()
@@ -454,13 +525,114 @@ async def early_other_person_input(msg: types.Message, state: FSMContext):
     if not surname or not room.isdigit() or not (100 <= int(room) <= 555):
         return await msg.answer("Комната должна быть числом от 100 до 555. Например: <code>Иванов 412</code>.", parse_mode="HTML")
 
+    data = await state.get_data()
     user_id = ensure_user_by_surname_room(surname, room)
     await state.update_data(
         target_user_id=int(user_id),
         target_surname=surname,
         target_room=room,
     )
+
+    replacement_booking_id = data.get("replacement_booking_id")
+    if replacement_booking_id:
+        if int(user_id) == int(data.get("replacement_old_user_id", -1)):
+            return await msg.answer("Этот человек уже владелец записи. Укажите другого.")
+
+        machine_type = str(data["replacement_machine_type"])
+        date_iso = str(data["replacement_date"])
+        if daily_limit_reached(int(user_id), date_iso, machine_type):
+            return await msg.answer(
+                "У этого человека уже есть запись на этот тип машины в этот день. "
+                "Укажите другого пользователя."
+            )
+
+        old_name = data.get("replacement_old_surname") or (
+            f"@{data.get('replacement_old_username')}"
+            if data.get("replacement_old_username")
+            else "текущий пользователь"
+        )
+        old_room = data.get("replacement_old_room") or "-"
+        await state.set_state(EarlyBooking.replacement_confirming)
+        kb = InlineKeyboardMarkup(inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Переназначить",
+                    callback_data="admin_replace_confirm",
+                )
+            ],
+            [InlineKeyboardButton(text="❌ Отмена", callback_data="early_cancel")],
+        ])
+        return await msg.answer(
+            "👤 <b>Подтвердите переназначение</b>\n\n"
+            f"📅 {date_iso}\n"
+            f"⏰ {int(data['replacement_hour']):02d}:00\n"
+            f"{'🧺' if machine_type == 'wash' else '🌬️'} {data['replacement_machine_name']}\n\n"
+            f"Было: <b>{html.escape(str(old_name))}</b>, комн. {html.escape(str(old_room))}\n"
+            f"Станет: <b>{html.escape(surname)}</b>, комн. {html.escape(room)}\n\n"
+            "До нажатия кнопки старая запись остаётся действующей.",
+            reply_markup=kb,
+            parse_mode="HTML",
+        )
+
     await _show_calendar(msg, state, edit=False)
+
+
+@router.callback_query(F.data == "admin_replace_confirm")
+async def admin_replace_confirm(callback: types.CallbackQuery, state: FSMContext):
+    if not is_admin(callback.from_user.id):
+        return await callback.answer("🚫 Нет доступа.", show_alert=True)
+
+    data = await state.get_data()
+    try:
+        booking_id = int(data["replacement_booking_id"])
+        new_user_id = int(data["target_user_id"])
+    except Exception:
+        await state.clear()
+        return await callback.answer("Сессия устарела. Начните заново.", show_alert=True)
+
+    try:
+        old, new = await reassign_booking_safe(booking_id, new_user_id)
+    except DailyLimit:
+        return await callback.answer(
+            "У пользователя уже есть запись на этот тип машины в этот день.",
+            show_alert=True,
+        )
+    except BookingError as exc:
+        return await callback.answer(str(exc), show_alert=True)
+
+    with get_conn() as conn:
+        tg_row = conn.execute(
+            "SELECT tg_id FROM users WHERE id=?",
+            (int(new.user_id),),
+        ).fetchone()
+    if tg_row and int(tg_row[0]) > 0:
+        from handlers.laundry_features import schedule_reminder
+        await schedule_reminder(
+            int(tg_row[0]),
+            new.machine_name,
+            new.date,
+            new.hour,
+            30,
+        )
+
+    target = _target_text(data)
+    await state.clear()
+    await callback.answer("Запись переназначена.")
+    await callback.message.edit_text(
+        "✅ <b>Запись переназначена</b>\n\n"
+        f"👤 {target}\n"
+        f"📅 {new.date}\n"
+        f"⏰ {int(new.hour):02d}:00\n"
+        f"{'🧺' if new.machine_type == 'wash' else '🌬️'} {new.machine_name}\n\n"
+        "Слот ни на секунду не освобождался для других пользователей.",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="⬅️ К расписанию",
+                callback_data=f"admin_day_{data.get('replacement_schedule_date', new.date)}",
+            )]
+        ]),
+    )
 
 
 @router.callback_query(F.data == "early_noop")
