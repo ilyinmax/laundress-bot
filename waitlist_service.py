@@ -50,15 +50,28 @@ class Request:
     intervals: list[tuple[int, int]]
     machines: set[int]
     weekdays: set[int] = field(default_factory=set)
+    schedule: dict[int, list[tuple[int, int]]] = field(default_factory=dict)
     usage_points: int = 0
 
-    def accepts_hour(self, hour: int) -> bool:
-        return any(start <= hour < end for start, end in self.intervals)
+    def intervals_for_date(self, date_iso: str) -> list[tuple[int, int]]:
+        weekday = datetime.fromisoformat(str(date_iso)).date().weekday()
+        if self.schedule:
+            return list(self.schedule.get(weekday, []))
+        if self.weekdays and weekday not in self.weekdays:
+            return []
+        return list(self.intervals)
+
+    def accepts_hour(self, hour: int, date_iso: str | None = None) -> bool:
+        intervals = self.intervals_for_date(date_iso) if date_iso else self.intervals
+        return any(start <= hour < end for start, end in intervals)
 
     def accepts_machine(self, machine_id: int) -> bool:
         return self.any_machine or machine_id in self.machines
 
     def accepts_date(self, date_iso: str) -> bool:
+        if self.schedule:
+            weekday = datetime.fromisoformat(str(date_iso)).date().weekday()
+            return bool(self.schedule.get(weekday))
         if not self.weekdays:
             return True
         return datetime.fromisoformat(str(date_iso)).date().weekday() in self.weekdays
@@ -252,17 +265,7 @@ def cancel_request_for_tg(tg_id: int) -> bool:
     return True
 
 
-def save_request(
-    tg_id: int,
-    intervals: list[tuple[int, int]],
-    machine_ids: list[int],
-    any_machine: bool,
-    mode: str,
-    weekdays: list[int] | None = None,
-) -> int:
-    now = datetime.now(TZ)
-    if mode not in {"auto", "notify"}:
-        raise ValueError("Некорректный режим")
+def _normalize_intervals(intervals: list[tuple[int, int]]) -> list[tuple[int, int]]:
     normalized: list[tuple[int, int]] = []
     for start, end in sorted((int(a), int(b)) for a, b in intervals):
         if start < min(WORKING_HOURS) or end > max(WORKING_HOURS) + 1 or start >= end:
@@ -272,11 +275,65 @@ def save_request(
         else:
             normalized.append((start, end))
     if not normalized or len(normalized) > 3:
-        raise ValueError("Нужно выбрать от 1 до 3 интервалов")
+        raise ValueError("Для каждого дня нужно выбрать от 1 до 3 интервалов")
+    return normalized
+
+
+def _normalize_schedule(
+    intervals: list[tuple[int, int]],
+    weekdays: list[int] | None,
+    schedule: dict[int, list[tuple[int, int]]] | None,
+) -> dict[int, list[tuple[int, int]]]:
+    if schedule is not None:
+        normalized_schedule: dict[int, list[tuple[int, int]]] = {}
+        for raw_day, raw_intervals in schedule.items():
+            day = int(raw_day)
+            if day < 0 or day > 6:
+                raise ValueError("Некорректный день недели")
+            if raw_intervals:
+                normalized_schedule[day] = _normalize_intervals(list(raw_intervals))
+        if not normalized_schedule:
+            raise ValueError("Настройте хотя бы один день")
+        return normalized_schedule
 
     normalized_weekdays = sorted({int(x) for x in (weekdays or [])})
     if any(day < 0 or day > 6 for day in normalized_weekdays):
         raise ValueError("Некорректный день недели")
+    common = _normalize_intervals(intervals)
+    days = normalized_weekdays or list(range(7))
+    return {day: list(common) for day in days}
+
+
+def _legacy_intervals_from_schedule(
+    schedule: dict[int, list[tuple[int, int]]],
+) -> list[tuple[int, int]]:
+    # Kept only for backwards compatibility with admin/export code from older
+    # deployments. Matching uses waitlist_schedule directly.
+    unique = {
+        (int(start), int(end))
+        for intervals in schedule.values()
+        for start, end in intervals
+    }
+    return sorted(unique)
+
+
+def save_request(
+    tg_id: int,
+    intervals: list[tuple[int, int]],
+    machine_ids: list[int],
+    any_machine: bool,
+    mode: str,
+    weekdays: list[int] | None = None,
+    schedule: dict[int, list[tuple[int, int]]] | None = None,
+) -> int:
+    now = datetime.now(TZ)
+    if mode not in {"auto", "notify"}:
+        raise ValueError("Некорректный режим")
+
+    normalized_schedule = _normalize_schedule(intervals, weekdays, schedule)
+    legacy_intervals = _legacy_intervals_from_schedule(normalized_schedule)
+    schedule_days = sorted(normalized_schedule)
+    legacy_weekdays = [] if schedule_days == list(range(7)) else schedule_days
 
     with get_conn() as conn:
         user = conn.execute(
@@ -312,15 +369,10 @@ def save_request(
             (user_id,),
         ).fetchone()
         now_s = now.isoformat(timespec="seconds")
+        hold_rows = []
+
         if old:
             request_id = int(old[0])
-            old_intervals = [
-                (int(a), int(b))
-                for a, b in conn.execute(
-                    "SELECT start_hour,end_hour FROM waitlist_intervals WHERE request_id=? ORDER BY start_hour",
-                    (request_id,),
-                ).fetchall()
-            ]
             old_machines = {
                 int(r[0])
                 for r in conn.execute(
@@ -328,22 +380,16 @@ def save_request(
                     (request_id,),
                 ).fetchall()
             }
-            old_weekdays = {
-                int(r[0])
-                for r in conn.execute(
-                    "SELECT weekday FROM waitlist_weekdays WHERE request_id=?",
-                    (request_id,),
-                ).fetchall()
-            }
             new_machines = set() if any_machine else {int(x) for x in machine_ids}
-            new_weekdays = set(normalized_weekdays)
-            conditions_changed = (
-                old_intervals != normalized
-                or bool(old[2]) != bool(any_machine)
+
+            # Editing days/hours or switching AUTO/notify must not erase waiting
+            # time. Only changing the machine eligibility changes queue priority.
+            machine_conditions_changed = (
+                bool(old[2]) != bool(any_machine)
                 or old_machines != new_machines
-                or old_weekdays != new_weekdays
             )
-            priority_since = now_s if conditions_changed else str(old[3])
+            priority_since = now_s if machine_conditions_changed else str(old[3])
+
             conn.execute(
                 """
                 UPDATE waitlist_requests
@@ -363,6 +409,7 @@ def save_request(
             conn.execute("DELETE FROM waitlist_intervals WHERE request_id=?", (request_id,))
             conn.execute("DELETE FROM waitlist_machines WHERE request_id=?", (request_id,))
             conn.execute("DELETE FROM waitlist_weekdays WHERE request_id=?", (request_id,))
+            conn.execute("DELETE FROM waitlist_schedule WHERE request_id=?", (request_id,))
         else:
             cur = conn.execute(
                 """
@@ -379,22 +426,37 @@ def save_request(
                     (user_id,),
                 ).fetchone()[0])
 
-        for start, end in normalized:
+        for weekday, day_intervals in sorted(normalized_schedule.items()):
+            for start, end in day_intervals:
+                conn.execute(
+                    """
+                    INSERT INTO waitlist_schedule(request_id,weekday,start_hour,end_hour)
+                    VALUES (?,?,?,?)
+                    ON CONFLICT DO NOTHING
+                    """,
+                    (request_id, int(weekday), int(start), int(end)),
+                )
+
+        # Legacy mirror: harmless for new code and keeps older admin/export
+        # readers usable during rolling deployments.
+        for start, end in legacy_intervals:
             conn.execute(
                 "INSERT INTO waitlist_intervals(request_id,start_hour,end_hour) VALUES (?,?,?)",
                 (request_id, int(start), int(end)),
             )
+        for weekday in legacy_weekdays:
+            conn.execute(
+                "INSERT INTO waitlist_weekdays(request_id,weekday) VALUES (?,?) ON CONFLICT DO NOTHING",
+                (request_id, int(weekday)),
+            )
+
         if not any_machine:
             for mid in sorted({int(x) for x in machine_ids}):
                 conn.execute(
                     "INSERT INTO waitlist_machines(request_id,machine_id) VALUES (?,?) ON CONFLICT DO NOTHING",
                     (request_id, mid),
                 )
-        for weekday in normalized_weekdays:
-            conn.execute(
-                "INSERT INTO waitlist_weekdays(request_id,weekday) VALUES (?,?) ON CONFLICT DO NOTHING",
-                (request_id, int(weekday)),
-            )
+
     if old:
         for (hold_id,) in hold_rows:
             _cancel_hold_expiry(int(hold_id))
@@ -424,8 +486,12 @@ def _active_requests(cutoff_at: str | None = None) -> list[Request]:
                 ORDER BY wr.priority_since
                 """
             ).fetchall()
+
         interval_rows = conn.execute(
             "SELECT request_id,start_hour,end_hour FROM waitlist_intervals"
+        ).fetchall()
+        schedule_rows = conn.execute(
+            "SELECT request_id,weekday,start_hour,end_hour FROM waitlist_schedule ORDER BY request_id,weekday,start_hour"
         ).fetchall()
         machine_rows = conn.execute(
             "SELECT request_id,machine_id FROM waitlist_machines"
@@ -434,9 +500,7 @@ def _active_requests(cutoff_at: str | None = None) -> list[Request]:
             "SELECT request_id,weekday FROM waitlist_weekdays"
         ).fetchall()
         now_s = datetime.now(TZ).isoformat(timespec="seconds")
-        banned_rows = conn.execute(
-            "SELECT tg_id,banned_until FROM banned"
-        ).fetchall()
+        banned_rows = conn.execute("SELECT tg_id,banned_until FROM banned").fetchall()
         held_user_rows = conn.execute(
             """
             SELECT DISTINCT user_id
@@ -458,9 +522,17 @@ def _active_requests(cutoff_at: str | None = None) -> list[Request]:
     intervals: dict[int, list[tuple[int, int]]] = {}
     for rid, start, end in interval_rows:
         intervals.setdefault(int(rid), []).append((int(start), int(end)))
+
+    schedules: dict[int, dict[int, list[tuple[int, int]]]] = {}
+    for rid, weekday, start, end in schedule_rows:
+        schedules.setdefault(int(rid), {}).setdefault(int(weekday), []).append(
+            (int(start), int(end))
+        )
+
     machines: dict[int, set[int]] = {}
     for rid, mid in machine_rows:
         machines.setdefault(int(rid), set()).add(int(mid))
+
     weekdays: dict[int, set[int]] = {}
     for rid, weekday in weekday_rows:
         weekdays.setdefault(int(rid), set()).add(int(weekday))
@@ -478,6 +550,7 @@ def _active_requests(cutoff_at: str | None = None) -> list[Request]:
                 banned_tg_ids.add(int(tg_id))
         except Exception:
             banned_tg_ids.add(int(tg_id))
+
     held_user_ids = {int(r[0]) for r in held_user_rows}
     today_iso = now.date().isoformat()
     users_with_future_wash = set()
@@ -492,17 +565,28 @@ def _active_requests(cutoff_at: str | None = None) -> list[Request]:
             continue
         if int(uid) in held_user_ids:
             continue
-        # Legacy requests created before the future-booking guard must not
-        # allow a user to stack another future wash.
         if int(uid) in users_with_future_wash:
             continue
 
+        request_schedule = schedules.get(int(rid), {})
+        request_weekdays = weekdays.get(int(rid), set())
+        if request_schedule:
+            keys = set(request_schedule)
+            request_weekdays = set() if keys == set(range(7)) else keys
+
         result.append(Request(
-            int(rid), int(uid), int(tg), str(mode), bool(any_machine),
-            _dt(priority_since), intervals.get(int(rid), []),
+            int(rid),
+            int(uid),
+            int(tg),
+            str(mode),
+            bool(any_machine),
+            _dt(priority_since),
+            intervals.get(int(rid), []),
             machines.get(int(rid), set()),
-            weekdays.get(int(rid), set()),
+            request_weekdays,
+            request_schedule,
         ))
+
     penalties = usage_penalties_for_users([x.user_id for x in result])
     for req in result:
         req.usage_points = int(penalties.get(req.user_id, 0))
@@ -555,11 +639,19 @@ async def check_active_waitlist() -> int:
     return matched
 
 
-def _match(requests: list[Request], slots: list[tuple[int, int]]) -> dict[int, tuple[int, int]]:
+def _match(
+    requests: list[Request],
+    slots: list[tuple[int, int]],
+    date_iso: str | None = None,
+) -> dict[int, tuple[int, int]]:
     now = datetime.now(TZ)
     allowed: dict[int, list[tuple[int, int]]] = {}
     for req in requests:
-        opts = [slot for slot in slots if req.accepts_machine(slot[0]) and req.accepts_hour(slot[1])]
+        opts = [
+            slot
+            for slot in slots
+            if req.accepts_machine(slot[0]) and req.accepts_hour(slot[1], date_iso)
+        ]
         if opts:
             allowed[req.id] = opts
 
@@ -811,7 +903,7 @@ async def _distribute_date_locked(date_iso: str, *, context: str = "day") -> int
     slots = _free_slots(date_iso)
     if not slots:
         return 0
-    matches = _match(requests, slots) if requests else {}
+    matches = _match(requests, slots, date_iso=date_iso) if requests else {}
     by_id = {r.id: r for r in requests}
     count = 0
     for rid, (mid, hour) in matches.items():
