@@ -1189,7 +1189,7 @@ async def waitlist_mode(msg: types.Message, state: FSMContext):
         + f"{_format_schedule(schedule)}\n\n"
         + f"🧺 Машинки: {machines}\n"
         + f"⚡ Режим: {mode_text}\n\n"
-        + "Заявка действует, пока вам не найдётся подходящее место или вы её не отмените.",
+        + "Подписка остаётся включённой, пока вы сами её не отмените. После каждой состоявшейся стирки она снова начинает участвовать в очереди.",
         parse_mode="HTML",
         reply_markup=reply_menu([[action], ["⬅️ Назад", "🏠 Главное меню"]]),
     )
@@ -1246,7 +1246,7 @@ async def waitlist_cancel(msg: types.Message, state: FSMContext):
     await state.clear()
     ok = cancel_request_for_tg(msg.from_user.id)
     await msg.answer(
-        "✅ Заявка отменена." if ok else "Активной заявки уже нет.",
+        "✅ Подписка отключена." if ok else "Активной подписки уже нет.",
         reply_markup=main_kb(msg.from_user.id),
     )
 
