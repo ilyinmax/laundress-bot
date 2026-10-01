@@ -35,6 +35,7 @@ def pretty_date(date_iso: str) -> str:
     return f"{d.day} {MONTHS[d.month]}"
 
 HOLD_MINUTES = 2
+MIN_AUTO_LEAD_MINUTES = 30
 WAITLIST_ENABLED = os.getenv("WAITLIST_ENABLED", "true").lower() not in {"0", "false", "off", "no"}
 
 
@@ -76,6 +77,20 @@ def _dt(value) -> datetime:
     dt = datetime.fromisoformat(str(value))
     return dt if dt.tzinfo else dt.replace(tzinfo=TZ)
 
+
+def _slot_start(date_iso: str, hour: int) -> datetime:
+    d = datetime.fromisoformat(str(date_iso)).date()
+    return datetime.combine(d, datetime.min.time(), tzinfo=TZ).replace(hour=int(hour))
+
+
+def _auto_booking_allowed(
+    date_iso: str,
+    hour: int,
+    now: datetime | None = None,
+) -> bool:
+    """AUTO may book silently only when the user has at least 30 minutes' notice."""
+    now = now or datetime.now(TZ)
+    return _slot_start(date_iso, hour) - now >= timedelta(minutes=MIN_AUTO_LEAD_MINUTES)
 
 
 def _remove_job(job_id: str) -> None:
@@ -666,9 +681,24 @@ async def _send_auto_confirmation(req: Request, result, *, night: bool) -> None:
         pass
 
 
-async def _create_hold(req: Request, machine_id: int, date_iso: str, hour: int, context: str) -> None:
+async def _create_hold(
+    req: Request,
+    machine_id: int,
+    date_iso: str,
+    hour: int,
+    context: str,
+    *,
+    urgent_auto: bool = False,
+) -> None:
     if BOT is None:
         return
+
+    now = datetime.now(TZ)
+    slot_start = _slot_start(date_iso, hour)
+    expires = min(now + timedelta(minutes=HOLD_MINUTES), slot_start)
+    if expires <= now:
+        return
+
     with get_conn() as conn:
         existing = conn.execute(
             """
@@ -676,14 +706,13 @@ async def _create_hold(req: Request, machine_id: int, date_iso: str, hour: int, 
             WHERE user_id=? AND status='active' AND expires_at>?
             LIMIT 1
             """,
-            (req.user_id, datetime.now(TZ).isoformat(timespec="seconds")),
+            (req.user_id, now.isoformat(timespec="seconds")),
         ).fetchone()
         if existing:
             return
         machine = conn.execute("SELECT name FROM machines WHERE id=?", (machine_id,)).fetchone()
         if not machine:
             return
-        expires = datetime.now(TZ) + timedelta(minutes=HOLD_MINUTES)
         cur = conn.execute(
             """
             INSERT INTO slot_holds
@@ -693,7 +722,7 @@ async def _create_hold(req: Request, machine_id: int, date_iso: str, hour: int, 
             (
                 req.id, req.user_id, machine_id, date_iso, hour,
                 expires.isoformat(timespec="seconds"), context,
-                datetime.now(TZ).isoformat(timespec="seconds"),
+                now.isoformat(timespec="seconds"),
             ),
         )
         hold_id = getattr(cur, "lastrowid", None)
@@ -707,17 +736,35 @@ async def _create_hold(req: Request, machine_id: int, date_iso: str, hour: int, 
                 (req.id, machine_id, date_iso, hour),
             ).fetchone()[0])
 
+    full_hold = expires >= now + timedelta(minutes=HOLD_MINUTES)
+    hold_text = (
+        f"Слот зарезервирован за вами на {HOLD_MINUTES} минуты."
+        if full_hold
+        else "Слот зарезервирован за вами до начала стирки."
+    )
+
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Записаться", callback_data=f"wl_accept_{hold_id}"),
         InlineKeyboardButton(text="❌ Пропустить", callback_data=f"wl_decline_{hold_id}"),
     ]])
-    text = (
-        "🔔 <b>Для вас найдено место</b>\n\n"
-        f"📅 {pretty_date(date_iso)}\n"
-        f"🕐 {hour:02d}:00\n"
-        f"🧺 {machine[0]}\n\n"
-        f"Слот зарезервирован за вами на {HOLD_MINUTES} минуты."
-    )
+    if urgent_auto:
+        text = (
+            "⚡ <b>Освободилось место совсем скоро</b>\n\n"
+            f"📅 {pretty_date(date_iso)}\n"
+            f"🕐 {hour:02d}:00\n"
+            f"🧺 {machine[0]}\n\n"
+            f"До начала осталось меньше {MIN_AUTO_LEAD_MINUTES} минут, поэтому бот "
+            "не стал записывать вас автоматически.\n"
+            f"{hold_text}"
+        )
+    else:
+        text = (
+            "🔔 <b>Для вас найдено место</b>\n\n"
+            f"📅 {pretty_date(date_iso)}\n"
+            f"🕐 {hour:02d}:00\n"
+            f"🧺 {machine[0]}\n\n"
+            f"{hold_text}"
+        )
     try:
         await BOT.send_message(
             req.tg_id, text, parse_mode="HTML", reply_markup=kb,
@@ -772,7 +819,7 @@ async def _distribute_date_locked(date_iso: str, *, context: str = "day") -> int
     count = 0
     for rid, (mid, hour) in matches.items():
         req = by_id[rid]
-        if req.mode == "auto":
+        if req.mode == "auto" and _auto_booking_allowed(date_iso, hour):
             try:
                 result = await create_booking_safe(req.user_id, mid, date_iso, hour)
             except BookingError:
@@ -781,7 +828,14 @@ async def _distribute_date_locked(date_iso: str, *, context: str = "day") -> int
             await _send_auto_confirmation(req, result, night=context == "night")
             count += 1
         else:
-            await _create_hold(req, mid, date_iso, hour, context)
+            await _create_hold(
+                req,
+                mid,
+                date_iso,
+                hour,
+                context,
+                urgent_auto=req.mode == "auto",
+            )
             count += 1
     if context == "day":
         await offer_earlier_for_date(date_iso)
