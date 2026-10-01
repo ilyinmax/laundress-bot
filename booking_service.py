@@ -463,10 +463,10 @@ async def reassign_booking_safe(
     new_user_id: int,
 ) -> tuple[BookingResult, BookingResult]:
     """
-    Atomically replace the owner of a future booking.
+    Atomically change the owner of a future booking.
 
-    The old booking remains visible until the transaction commits, so the slot
-    is never free for ordinary booking or waitlist redistribution.
+    The booking row itself is updated in-place, so UNIQUE(machine_id,date,hour)
+    is never released and the waitlist/ordinary booking can never steal the slot.
     """
     async with _BOOKING_LOCK:
         conn = get_conn()
@@ -490,30 +490,105 @@ async def reassign_booking_safe(
             if int(old.user_id) == int(new_user_id):
                 raise InvalidBooking("Этот человек уже владелец записи")
 
-            new = _insert_booking(
-                conn,
+            user = conn.execute(
+                "SELECT tg_id FROM users WHERE id=?",
+                (int(new_user_id),),
+            ).fetchone()
+            if not user:
+                raise InvalidBooking("Пользователь не найден")
+            new_tg_id = int(user[0])
+            if new_tg_id > 0 and is_banned(new_tg_id):
+                raise InvalidBooking("Пользователь заблокирован")
+
+            machine = conn.execute(
+                "SELECT type,name,is_active FROM machines WHERE id=?",
+                (int(old.machine_id),),
+            ).fetchone()
+            if not machine:
+                raise InvalidBooking("Машина не найдена")
+            machine_type, machine_name, is_active = machine
+            if not is_active:
+                raise InvalidBooking("Машина сейчас недоступна")
+
+            # The replacement user must obey the same one-booking-per-type/day
+            # rule as a normal booking. The booking being replaced belongs to a
+            # different user, so it does not need to be excluded here.
+            if new_tg_id <= 0 or not is_admin(new_tg_id):
+                exists = conn.execute(
+                    """
+                    SELECT 1
+                    FROM bookings b
+                    JOIN machines m ON m.id=b.machine_id
+                    WHERE b.user_id=? AND b.date=? AND m.type=?
+                    LIMIT 1
+                    """,
+                    (int(new_user_id), str(old.date), str(machine_type)),
+                ).fetchone()
+                if exists:
+                    raise DailyLimit("На этот тип машины уже есть запись в этот день")
+
+            if str(machine_type) == "dry" and (new_tg_id <= 0 or not is_admin(new_tg_id)):
+                has_wash = conn.execute(
+                    """
+                    SELECT 1
+                    FROM bookings b
+                    JOIN machines m ON m.id=b.machine_id
+                    WHERE b.user_id=? AND b.date=? AND m.type='wash'
+                    LIMIT 1
+                    """,
+                    (int(new_user_id), str(old.date)),
+                ).fetchone()
+                if not has_wash:
+                    raise InvalidBooking(
+                        "У пользователя нет стирки в этот день для записи на сушилку"
+                    )
+
+            if DATABASE_URL:
+                conn.execute(
+                    "SELECT pg_advisory_xact_lock(hashtext(?))",
+                    (f"booking-reassign:{int(current_booking_id)}",),
+                )
+
+            # Keep the same booking id/date/hour/machine and change only owner.
+            conn.execute(
+                "UPDATE bookings SET user_id=? WHERE id=?",
+                (int(new_user_id), int(current_booking_id)),
+            )
+
+            # Any already-rendered reminder card belongs to the old owner/chat.
+            # A fresh card/reminder will be rebuilt for the new owner.
+            try:
+                conn.execute(
+                    "DELETE FROM reminder_cards WHERE booking_id=?",
+                    (int(current_booking_id),),
+                )
+                conn.execute(
+                    "DELETE FROM laundry_timers WHERE booking_id=?",
+                    (int(current_booking_id),),
+                )
+            except Exception:
+                pass
+
+            new = BookingResult(
+                int(old.booking_id),
                 int(new_user_id),
                 int(old.machine_id),
+                str(machine_type),
+                str(machine_name),
                 str(old.date),
                 int(old.hour),
-                allowed_hold_id=None,
-                close_waitlist=False,
-                ignore_booking_id=int(current_booking_id),
-            )
-            conn.execute(
-                "DELETE FROM bookings WHERE id=?",
-                (int(current_booking_id),),
             )
             _commit(raw)
 
-            if old.machine_type == "wash":
+            if str(machine_type) == "wash":
                 try:
                     from waitlist_service import sync_subscription_pause_for_user
-                    # Old owner loses the booking and may return to the queue.
+                    # The old owner's subscription can resume immediately if
+                    # they have no other future wash.
                     sync_subscription_pause_for_user(int(old.user_id))
-                    # New owner now has a future wash, so their subscription
-                    # must pause/match against the replacement booking.
-                    sync_subscription_pause_for_user(int(new.user_id))
+                    # The new owner's subscription is paused/matched against
+                    # this existing booking.
+                    sync_subscription_pause_for_user(int(new_user_id))
                 except Exception:
                     pass
 
