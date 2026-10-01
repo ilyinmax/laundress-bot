@@ -1236,6 +1236,9 @@ async def offer_earlier_for_date(date_iso: str) -> int:
         interval_rows = conn.execute(
             "SELECT request_id,start_hour,end_hour FROM waitlist_intervals"
         ).fetchall()
+        schedule_rows = conn.execute(
+            "SELECT request_id,weekday,start_hour,end_hour FROM waitlist_schedule ORDER BY request_id,weekday,start_hour"
+        ).fetchall()
         machine_rows = conn.execute(
             "SELECT request_id,machine_id FROM waitlist_machines"
         ).fetchall()
@@ -1246,6 +1249,11 @@ async def offer_earlier_for_date(date_iso: str) -> int:
     intervals = {}
     for rid, a, b in interval_rows:
         intervals.setdefault(int(rid), []).append((int(a), int(b)))
+    schedules = {}
+    for rid, weekday, a, b in schedule_rows:
+        schedules.setdefault(int(rid), {}).setdefault(int(weekday), []).append(
+            (int(a), int(b))
+        )
     machines = {}
     for rid, mid in machine_rows:
         machines.setdefault(int(rid), set()).add(int(mid))
@@ -1272,11 +1280,17 @@ async def offer_earlier_for_date(date_iso: str) -> int:
             continue
         if active_hold_for_user(int(uid)):
             continue
+        request_schedule = schedules.get(int(rid), {})
+        request_weekdays = weekdays.get(int(rid), set())
+        if request_schedule:
+            keys = set(request_schedule)
+            request_weekdays = set() if keys == set(range(7)) else keys
         candidate = Request(
             int(rid), int(uid), int(tg), "notify", bool(any_machine),
             _dt(priority_since), intervals.get(int(rid), []),
             machines.get(int(rid), set()),
-            weekdays.get(int(rid), set()),
+            request_weekdays,
+            request_schedule,
         )
         if not candidate.accepts_date(date_iso):
             continue
@@ -1293,7 +1307,9 @@ async def offer_earlier_for_date(date_iso: str) -> int:
     for mid, hour in sorted(slots, key=lambda x: (x[1], x[0])):
         compatible = [
             c for c in candidates
-            if c.id not in used_users and c.accepts_machine(mid) and c.accepts_hour(hour)
+            if c.id not in used_users
+            and c.accepts_machine(mid)
+            and c.accepts_hour(hour, date_iso)
         ]
         if not compatible:
             continue
