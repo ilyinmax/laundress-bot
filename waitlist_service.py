@@ -519,9 +519,8 @@ async def rebuild_waitlist_jobs() -> None:
             )
 
     # Normalize active persistent subscriptions against existing future
-    # washes. This is especially important for legacy subscriptions restored
-    # by the persistent-subscription migration: if the user already has a wash,
-    # the subscription becomes matched instead of competing for another slot.
+    # washes. If the user already has a wash, the subscription must not compete
+    # for another slot.
     with get_conn() as conn:
         active_user_rows = conn.execute(
             """
@@ -532,6 +531,44 @@ async def rebuild_waitlist_jobs() -> None:
         ).fetchall()
     for (user_id,) in active_user_rows:
         sync_subscription_pause_for_user(int(user_id))
+
+    # A persistent subscription that has already completed a wash must never
+    # keep waiting time from before that wash. This also repairs legacy rows
+    # created before persistent lifecycle handling existed.
+    with get_conn() as conn:
+        active_rows = conn.execute(
+            """
+            SELECT wr.id,wr.priority_since,l.occurred_at
+            FROM waitlist_requests wr
+            JOIN (
+                SELECT user_id,MAX(occurred_at) AS occurred_at
+                FROM laundry_usage_history
+                GROUP BY user_id
+            ) l ON l.user_id=wr.user_id
+            WHERE wr.persistent=1 AND wr.status='active'
+            """
+        ).fetchall()
+
+        for request_id, priority_since, occurred_at in active_rows:
+            try:
+                priority_dt = _dt(priority_since)
+                usage_dt = _dt(occurred_at)
+            except Exception:
+                continue
+            resume_at = usage_dt + timedelta(hours=1)
+            if priority_dt < resume_at:
+                conn.execute(
+                    """
+                    UPDATE waitlist_requests
+                    SET priority_since=?,updated_at=?
+                    WHERE id=? AND persistent=1 AND status='active'
+                    """,
+                    (
+                        resume_at.isoformat(timespec="seconds"),
+                        datetime.now(TZ).isoformat(timespec="seconds"),
+                        int(request_id),
+                    ),
+                )
 
     schedule_next_pending_notification()
     await check_active_waitlist()
