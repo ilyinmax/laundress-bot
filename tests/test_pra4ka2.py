@@ -715,6 +715,43 @@ class Pra4ka2Tests(unittest.TestCase):
         )
 
 
+    def test_startup_repairs_active_priority_older_than_last_wash(self):
+        import waitlist_service as wl
+
+        rid = wl.save_request(1001, [(10, 12)], [], True, "auto")
+        uid = self.uid(1001)
+        now = datetime.now(TZ)
+        old_priority = now - timedelta(days=3)
+        wash_start = now - timedelta(days=1)
+
+        with database.get_conn() as conn:
+            conn.execute(
+                "UPDATE waitlist_requests SET priority_since=? WHERE id=?",
+                (old_priority.isoformat(timespec="seconds"), rid),
+            )
+            conn.execute(
+                """
+                INSERT INTO laundry_usage_history(user_id,booking_id,occurred_at)
+                VALUES (?,?,?)
+                """,
+                (uid, 999999, wash_start.isoformat(timespec="seconds")),
+            )
+
+        asyncio.run(wl.rebuild_waitlist_jobs())
+
+        with database.get_conn() as conn:
+            priority = conn.execute(
+                "SELECT priority_since FROM waitlist_requests WHERE id=?",
+                (rid,),
+            ).fetchone()[0]
+
+        repaired = datetime.fromisoformat(str(priority))
+        if repaired.tzinfo is None:
+            repaired = repaired.replace(tzinfo=TZ)
+        expected = wash_start + timedelta(hours=1)
+        self.assertLess(abs((repaired - expected).total_seconds()), 2)
+
+
     def test_subscription_reactivates_after_successful_wash_with_new_priority(self):
         import booking_service as bs
         import waitlist_service as wl
