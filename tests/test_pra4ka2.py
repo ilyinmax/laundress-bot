@@ -413,6 +413,140 @@ class Pra4ka2Tests(unittest.TestCase):
         ))
 
 
+    def test_flexible_schedule_uses_different_hours_per_weekday(self):
+        import waitlist_service as wl
+
+        first_date = datetime.now(TZ).date() + timedelta(days=1)
+        second_date = first_date + timedelta(days=1)
+        first_weekday = first_date.weekday()
+        second_weekday = second_date.weekday()
+
+        rid = wl.save_request(
+            1001,
+            [],
+            [],
+            True,
+            "auto",
+            schedule={
+                first_weekday: [(10, 22)],
+                second_weekday: [(18, 22)],
+            },
+        )
+        self.assertTrue(rid)
+
+        req = next(r for r in wl._active_requests() if r.tg_id == 1001)
+        self.assertTrue(req.accepts_date(first_date.isoformat()))
+        self.assertTrue(req.accepts_date(second_date.isoformat()))
+        self.assertTrue(req.accepts_hour(10, first_date.isoformat()))
+        self.assertFalse(req.accepts_hour(10, second_date.isoformat()))
+        self.assertTrue(req.accepts_hour(19, second_date.isoformat()))
+
+        m1 = self.mid("Стиральная №1")
+        morning_match = wl._match(
+            [req],
+            [(m1, 10)],
+            date_iso=second_date.isoformat(),
+        )
+        evening_match = wl._match(
+            [req],
+            [(m1, 19)],
+            date_iso=second_date.isoformat(),
+        )
+        self.assertNotIn(req.id, morning_match)
+        self.assertEqual(evening_match[req.id], (m1, 19))
+
+        with database.get_conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT weekday,start_hour,end_hour
+                FROM waitlist_schedule
+                WHERE request_id=?
+                ORDER BY weekday,start_hour
+                """,
+                (rid,),
+            ).fetchall()
+        self.assertEqual(
+            [(int(d), int(a), int(b)) for d, a, b in rows],
+            [
+                (first_weekday, 10, 22),
+                (second_weekday, 18, 22),
+            ] if first_weekday < second_weekday else [
+                (second_weekday, 18, 22),
+                (first_weekday, 10, 22),
+            ],
+        )
+
+
+    def test_schedule_edit_keeps_waitlist_priority(self):
+        import waitlist_service as wl
+
+        day = (datetime.now(TZ).date() + timedelta(days=1)).weekday()
+        rid = wl.save_request(
+            1001,
+            [],
+            [],
+            True,
+            "auto",
+            schedule={day: [(10, 22)]},
+        )
+        old_priority = "2026-09-20T12:00:00+03:00"
+        with database.get_conn() as conn:
+            conn.execute(
+                "UPDATE waitlist_requests SET priority_since=? WHERE id=?",
+                (old_priority, rid),
+            )
+
+        rid2 = wl.save_request(
+            1001,
+            [],
+            [],
+            True,
+            "auto",
+            schedule={day: [(18, 22)]},
+        )
+        self.assertEqual(rid, rid2)
+        with database.get_conn() as conn:
+            priority = conn.execute(
+                "SELECT priority_since FROM waitlist_requests WHERE id=?",
+                (rid,),
+            ).fetchone()[0]
+        self.assertEqual(str(priority), old_priority)
+
+
+    def test_legacy_waitlist_schedule_is_migrated_without_changing_availability(self):
+        import waitlist_service as wl
+
+        allowed_day = (datetime.now(TZ).date() + timedelta(days=1)).weekday()
+        rid = wl.save_request(
+            1001,
+            [(18, 22)],
+            [],
+            True,
+            "auto",
+            weekdays=[allowed_day],
+        )
+
+        # Simulate a request created by the previous bot version.
+        with database.get_conn() as conn:
+            conn.execute("DELETE FROM waitlist_schedule WHERE request_id=?", (rid,))
+
+        database.ensure_pra4ka2_tables()
+
+        with database.get_conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT weekday,start_hour,end_hour
+                FROM waitlist_schedule
+                WHERE request_id=?
+                """,
+                (rid,),
+            ).fetchall()
+        self.assertEqual(
+            [(int(d), int(a), int(b)) for d, a, b in rows],
+            [(allowed_day, 18, 22)],
+        )
+
+
     def test_cancelling_future_waitlist_booking_reopens_same_request_with_priority(self):
         import booking_service as bs
         import waitlist_service as wl
