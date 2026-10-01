@@ -62,6 +62,85 @@ class Pra4ka2Tests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(int(count), 2)
 
+    def test_atomic_booking_reassignment_keeps_slot_occupied_and_syncs_subscriptions(self):
+        import booking_service as bs
+        import waitlist_service as wl
+
+        future = (datetime.now(TZ).date() + timedelta(days=2)).isoformat()
+        m1 = self.mid("Стиральная №1")
+
+        old_request = wl.save_request(1001, [(10, 12)], [], True, "auto")
+        new_request = wl.save_request(1002, [(10, 12)], [], True, "auto")
+
+        old_booking = asyncio.run(
+            bs.create_booking_safe(self.uid(1001), m1, future, 10)
+        )
+
+        old, new = asyncio.run(
+            bs.reassign_booking_safe(old_booking.booking_id, self.uid(1002))
+        )
+
+        self.assertEqual(old.booking_id, old_booking.booking_id)
+        self.assertEqual(new.user_id, self.uid(1002))
+        self.assertEqual(new.machine_id, m1)
+        self.assertEqual(new.date, future)
+        self.assertEqual(new.hour, 10)
+
+        with database.get_conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT id,user_id FROM bookings
+                WHERE machine_id=? AND date=? AND hour=?
+                """,
+                (m1, future, 10),
+            ).fetchall()
+            old_req = conn.execute(
+                "SELECT status,matched_booking_id FROM waitlist_requests WHERE id=?",
+                (old_request,),
+            ).fetchone()
+            new_req = conn.execute(
+                "SELECT status,matched_booking_id FROM waitlist_requests WHERE id=?",
+                (new_request,),
+            ).fetchone()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(int(rows[0][0]), new.booking_id)
+        self.assertEqual(int(rows[0][1]), self.uid(1002))
+        self.assertEqual(str(old_req[0]), "active")
+        self.assertIsNone(old_req[1])
+        self.assertEqual(str(new_req[0]), "matched")
+        self.assertEqual(int(new_req[1]), new.booking_id)
+
+
+    def test_failed_reassignment_keeps_original_booking(self):
+        import booking_service as bs
+
+        future = (datetime.now(TZ).date() + timedelta(days=2)).isoformat()
+        m1 = self.mid("Стиральная №1")
+        m3 = self.mid("Стиральная №3")
+
+        original = asyncio.run(
+            bs.create_booking_safe(self.uid(1001), m1, future, 10)
+        )
+        asyncio.run(
+            bs.create_booking_safe(self.uid(1002), m3, future, 11)
+        )
+
+        with self.assertRaises(bs.DailyLimit):
+            asyncio.run(
+                bs.reassign_booking_safe(original.booking_id, self.uid(1002))
+            )
+
+        with database.get_conn() as conn:
+            row = conn.execute(
+                "SELECT user_id FROM bookings WHERE id=?",
+                (original.booking_id,),
+            ).fetchone()
+
+        self.assertIsNotNone(row)
+        self.assertEqual(int(row[0]), self.uid(1001))
+
+
     def test_booking_limit_and_hold(self):
         import booking_service as bs
         import waitlist_service as wl
