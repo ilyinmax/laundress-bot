@@ -98,8 +98,11 @@ ADMIN_COMMANDS_TEXT = """🧺 <b>Все команды бота</b>
 
 
 def _target_text(data: dict) -> str:
+    username = str(data.get("target_username") or "").lstrip("@").strip()
     surname = data.get("target_surname") or "-"
     room = data.get("target_room") or "-"
+    if username:
+        return f"@{username} ({surname}, комн. {room})"
     return f"{surname}, комн. {room}"
 
 
