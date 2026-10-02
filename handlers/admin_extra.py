@@ -512,8 +512,8 @@ async def admin_replace_booking(callback: types.CallbackQuery, state: FSMContext
         f"📅 {str(date_iso)}\n"
         f"⏰ {int(hour):02d}:00\n"
         f"{'🧺' if str(machine_type) == 'wash' else '🌬️'} {machine_name}\n\n"
-        "Введите фамилию и комнату одним сообщением.\n"
-        "Например: <code>Иванов 412</code>\n\n"
+        "Введите <b>@username</b> или фамилию и комнату одним сообщением.\n"
+        "Например: <code>@ivanov</code> или <code>Иванов 412</code>\n\n"
         "До подтверждения старая запись остаётся на месте.",
         reply_markup=kb,
         parse_mode="HTML",
@@ -530,8 +530,8 @@ async def early_target_other(callback: types.CallbackQuery, state: FSMContext):
         [InlineKeyboardButton(text="❌ Отмена", callback_data="early_cancel")]
     ])
     await callback.message.edit_text(
-        "👤 Введите фамилию и комнату одним сообщением.\n\n"
-        "Например: <code>Иванов 412</code>",
+        "👤 Введите <b>@username</b> или фамилию и комнату одним сообщением.\n\n"
+        "Например: <code>@ivanov</code> или <code>Иванов 412</code>",
         reply_markup=kb,
         parse_mode="HTML",
     )
@@ -544,22 +544,69 @@ async def early_other_person_input(msg: types.Message, state: FSMContext):
         return await msg.answer("🚫 Нет доступа.")
 
     raw = (msg.text or "").strip()
-    try:
-        surname, room = raw.rsplit(maxsplit=1)
-    except ValueError:
-        return await msg.answer("Формат: <code>Фамилия Комната</code>, например <code>Иванов 412</code>.", parse_mode="HTML")
-
-    surname = surname.strip()
-    room = room.strip()
-    if not surname or not room.isdigit() or not (100 <= int(room) <= 555):
-        return await msg.answer("Комната должна быть числом от 100 до 555. Например: <code>Иванов 412</code>.", parse_mode="HTML")
-
     data = await state.get_data()
-    user_id = ensure_user_by_surname_room(surname, room)
+
+    # /early accepts either an existing Telegram username or the legacy
+    # "Фамилия Комната" form. Username lookup never creates a stub user:
+    # the target must already exist in the bot database and have a completed
+    # profile.
+    if raw.startswith("@") or (" " not in raw and raw):
+        username = raw.lstrip("@").strip()
+        with get_conn() as conn:
+            row = conn.execute(
+                """
+                SELECT id,surname,room,username
+                FROM users
+                WHERE LOWER(username)=LOWER(?)
+                LIMIT 1
+                """,
+                (username,),
+            ).fetchone()
+        if not row:
+            return await msg.answer(
+                "Пользователь с таким username не найден в боте.\n"
+                "Введите другой <code>@username</code> или используйте формат "
+                "<code>Фамилия Комната</code>.",
+                parse_mode="HTML",
+            )
+
+        user_id = int(row[0])
+        surname = _b64d_try(row[1]) if row[1] else None
+        room = _b64d_try(row[2]) if row[2] else None
+        username = str(row[3] or username)
+        if not surname or not room:
+            return await msg.answer(
+                "Этот пользователь ещё не завершил регистрацию в боте. "
+                "Для ранней записи нужен заполненный профиль."
+            )
+        target_label = f"@{username}"
+    else:
+        try:
+            surname, room = raw.rsplit(maxsplit=1)
+        except ValueError:
+            return await msg.answer(
+                "Введите <code>@username</code> или "
+                "<code>Фамилия Комната</code>, например <code>Иванов 412</code>.",
+                parse_mode="HTML",
+            )
+
+        surname = surname.strip()
+        room = room.strip()
+        if not surname or not room.isdigit() or not (100 <= int(room) <= 555):
+            return await msg.answer(
+                "Комната должна быть числом от 100 до 555. "
+                "Например: <code>Иванов 412</code>.",
+                parse_mode="HTML",
+            )
+        user_id = ensure_user_by_surname_room(surname, room)
+        target_label = f"{surname}, комн. {room}"
+
     await state.update_data(
         target_user_id=int(user_id),
-        target_surname=surname,
-        target_room=room,
+        target_surname=str(surname),
+        target_room=str(room),
+        target_username=(username if 'username' in locals() else ""),
+        target_label=target_label,
     )
 
     replacement_booking_id = data.get("replacement_booking_id")
