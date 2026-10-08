@@ -1385,7 +1385,7 @@ async def _activate_pending_night_hold(hold_id: int) -> bool:
         f"📅 {pretty_date(str(date_iso))}\n"
         f"🕐 {int(hour):02d}:00\n"
         f"🧺 {machine_name}\n\n"
-        _hold_deadline_text(expires, HOLD_MINUTES)
+        + _hold_deadline_text(expires, HOLD_MINUTES)
     )
     try:
         await BOT.send_message(
@@ -2154,7 +2154,7 @@ async def _create_move_hold(
         "🔄 <b>Можно перенести стирку раньше</b>\n\n"
         f"Сейчас: {pretty_date(str(current[1]))}, {int(current[2]):02d}:00, {current[0]}\n"
         f"Освободилось: {pretty_date(date_iso)}, {int(hour):02d}:00, {machine[0]}\n\n"
-        _hold_deadline_text(expires, minutes)
+        + _hold_deadline_text(expires, minutes)
     )
     try:
         await BOT.send_message(
