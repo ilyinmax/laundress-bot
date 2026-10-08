@@ -821,20 +821,9 @@ def save_request(
         if old:
             request_id = int(old[0])
             old_status = str(old[4])
-            old_machines = {
-                int(r[0])
-                for r in conn.execute(
-                    "SELECT machine_id FROM waitlist_machines WHERE request_id=?",
-                    (request_id,),
-                ).fetchall()
-            }
-            new_machines = set() if any_machine else {int(x) for x in machine_ids}
-
-            # Editing days/hours or switching AUTO/notify must not erase waiting
-            # time. Only changing machine eligibility resets an actively waiting
-            # subscription. Paused subscriptions do not start priority early.
-            # Machine preferences are editable without losing accrued waiting
-            # time, just like days/hours and AUTO/notify settings.
+            # Changing any preferences retains accumulated waiting time.
+            # Subscriptions created during an existing wash are still paused
+            # until that wash finishes.
 
             if controlling_booking:
                 booking_id, booking_date, booking_hour, booking_end = controlling_booking
@@ -843,16 +832,14 @@ def save_request(
                     priority_since = booking_end.isoformat(timespec="seconds")
                 else:
                     status = 'matched'
-                    priority_since = (
-                        str(old[3])
-                    )
+                    priority_since = str(old[3])
                 matched_booking_id = int(booking_id)
             else:
                 status = 'active'
                 matched_booking_id = None
                 if old_status == 'paused':
                     priority_since = now_s
-                 else:
+                else:
                     priority_since = str(old[3])
 
             conn.execute(
