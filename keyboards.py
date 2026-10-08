@@ -19,8 +19,10 @@ start_menu = reply_menu([["🧺 Начать запись"]])
 def build_main_menu(waitlist_active: bool = False) -> ReplyKeyboardMarkup:
     waitlist_text = "🔔 Лист ожидания • активен" if waitlist_active else "🔔 Лист ожидания"
     return reply_menu([
-        ["🧺 Записаться", "📋 Мои записи"],
-        [waitlist_text, "ℹ️ Помощь"],
+        [waitlist_text],
+        ["📋 Мои записи"],
+        ["🧺 Записаться"],
+        ["ℹ️ Помощь"],
     ])
 
 
