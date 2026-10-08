@@ -868,8 +868,7 @@ async def show_quick_edit_confirmation(msg: types.Message, state: FSMContext):
         + _compact_schedule(schedule) + "\n"
         + f"🧺 {machines}\n"
         + ("⚡ Автоматическая запись" if data.get("mode") == "auto"
-           else "🔔 Сначала спросить")
-        ,
+           else "🔔 Сначала спросить"),
         parse_mode="HTML",
         reply_markup=reply_menu([
             ["✅ Сохранить заявку"],
