@@ -127,13 +127,31 @@ class Pra4ka2Tests(unittest.TestCase):
         with patch("forecast_service.get_forecast", new=AsyncMock(return_value=forecast)):
             output = asyncio.run(ui._waitlist_summary(1001))
         self.assertIn("🔔 <b>Моя подписка</b>", output)
-        self.assertIn("Ваш приоритет", output)
+        self.assertIn("✅ <b>Подписка активна</b>", output)
+        self.assertNotIn("Ваш приоритет", output)
+        self.assertNotIn("баллов", output)
+        self.assertNotIn("Выше, чем у", output)
+        self.assertIn("Подходящих вариантов по времени: <b>5</b>", output)
+        self.assertIn("↗️ Шансы выше среднего", output)
+        self.assertLess(output.index("Ориентировочная дата стирки"), output.index("Шансы выше среднего"))
         self.assertNotIn("⭐", output)
         self.assertIn("📆 Пн, Ср, Пт · 18:00–22:00", output)
         self.assertIn("🧺 Любая машинка", output)
         self.assertIn("⚡ Автоматическая запись", output)
         self.assertIn("Прогноз по текущей очереди и расписанию", output)
         self.assertEqual(rid, int(wl.get_active_request_for_tg(1001)[0]))
+
+    def test_main_menu_is_vertical_and_waitlist_first(self):
+        from keyboards import build_main_menu
+        menu = build_main_menu(True)
+        labels = [[btn.text for btn in row] for row in menu.keyboard]
+        self.assertEqual(labels, [
+            ["🔔 Лист ожидания • активен"],
+            ["📋 Мои записи"],
+            ["🧺 Записаться"],
+            ["ℹ️ Помощь"],
+        ])
+
 
     def test_hold_deadline_displays_minutes_only(self):
         import waitlist_service as wl
