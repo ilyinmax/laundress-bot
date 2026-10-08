@@ -680,7 +680,7 @@ async def _waitlist_summary(tg_id: int) -> str:
     if status != "active":
         return heading + "Подписка сохранена. Ожидает возобновления." + settings
 
-    lines = [heading, "Подписка активна\n"]
+    lines = [heading, "✅ <b>Подписка активна</b>\n"]
     try:
         from forecast_service import get_forecast
         forecast = await get_forecast(int(rid))
@@ -690,22 +690,16 @@ async def _waitlist_summary(tg_id: int) -> str:
         forecast = None
     if forecast is not None:
         lines += [
-            "<b>Ваш приоритет</b>",
-            f"<b>{int(forecast['score'])} баллов</b>",
-            f"Выше, чем у {int(forecast['percent'])}% ожидающих\n",
-            "<b>Прогноз получения места</b>",
-            escape(str(forecast["chance"])),
-            "\n📅 <b>Ориентировочная дата стирки</b>",
+            "📅 <b>Ориентировочная дата стирки</b>",
             f"<b>{escape(str(forecast['date']))}</b>",
-            "Прогноз по текущей очереди и расписанию\n",
-            f"Подходящих часов: <b>{int(forecast['hours'])}</b>",
+            "Прогноз по текущей очереди и расписанию.\n",
+            escape(str(forecast["chance"])),
+            "",
+            f"Подходящих вариантов по времени: <b>{int(forecast['hours'])}</b>",
             f"Сейчас ожидают: <b>{int(forecast['waiting'])} человек</b>",
         ]
     else:
-        lines += [
-            "<b>Ваш приоритет</b>",
-            "Прогноз временно недоступен. Подписка продолжает работать.",
-        ]
+        lines.append("Прогноз временно недоступен. Подписка продолжает работать.")
     return "\n".join(lines) + settings
 
 
@@ -875,7 +869,7 @@ async def show_quick_edit_confirmation(msg: types.Message, state: FSMContext):
         + f"🧺 {machines}\n"
         + ("⚡ Автоматическая запись" if data.get("mode") == "auto"
            else "🔔 Сначала спросить")
-        + "\n\nНакопленный приоритет сохранится.",
+        ,
         parse_mode="HTML",
         reply_markup=reply_menu([
             ["✅ Сохранить заявку"],
