@@ -37,6 +37,35 @@ class Pra4ka2Tests(unittest.TestCase):
     def mid(self, name):
         return int(database.get_machine_id_by_name(name))
 
+    def test_hold_duration_policy(self):
+        import waitlist_service as wl
+
+        now = datetime.now(TZ).replace(microsecond=0)
+        for minutes_left, expected in (
+            (40, 5), (30, 5), (29, 2), (10, 2), (5, 2), (4, None)
+        ):
+            slot = now + timedelta(minutes=minutes_left)
+            # Slot starts at a whole hour. Control the clock relative to it.
+            slot_start = slot.replace(minute=0, second=0)
+            if slot_start <= now:
+                slot_start += timedelta(hours=1)
+            clock = slot_start - timedelta(minutes=minutes_left)
+            self.assertEqual(
+                wl._hold_duration_minutes(
+                    slot_start.date().isoformat(), slot_start.hour, clock
+                ),
+                expected,
+            )
+
+        future = now + timedelta(days=1)
+        self.assertEqual(
+            wl._hold_duration_minutes(future.date().isoformat(), future.hour, now),
+            5,
+        )
+        self.assertIn("5 минут", wl._hold_deadline_text(now + timedelta(minutes=5), 5))
+        self.assertIn("2 минуты", wl._hold_deadline_text(now + timedelta(minutes=2), 2))
+
+
     def test_repeated_waitlist_requests_and_matching(self):
         import waitlist_service as wl
 
