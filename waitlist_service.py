@@ -34,7 +34,9 @@ def pretty_date(date_iso: str) -> str:
     d = datetime.fromisoformat(str(date_iso)).date()
     return f"{d.day} {MONTHS[d.month]}"
 
-HOLD_MINUTES = 2
+HOLD_MINUTES = 5
+URGENT_HOLD_MINUTES = 2
+MIN_HOLD_LEAD_MINUTES = 5
 MIN_AUTO_LEAD_MINUTES = 30
 WAITLIST_ENABLED = os.getenv("WAITLIST_ENABLED", "true").lower() not in {"0", "false", "off", "no"}
 
@@ -108,6 +110,28 @@ def _auto_booking_allowed(
 
 def _booking_end(date_iso: str, hour: int) -> datetime:
     return _slot_start(date_iso, hour) + timedelta(hours=1)
+
+
+def _hold_duration_minutes(
+    date_iso: str, hour: int, now: datetime | None = None
+) -> int | None:
+    """5 min normally; 2 min with 5–30 min lead; no offer under 5 min."""
+    now = now or datetime.now(TZ)
+    lead = _slot_start(date_iso, hour) - now
+    if lead < timedelta(minutes=MIN_HOLD_LEAD_MINUTES):
+        return None
+    if lead < timedelta(minutes=MIN_AUTO_LEAD_MINUTES):
+        return URGENT_HOLD_MINUTES
+    return HOLD_MINUTES
+
+
+def _hold_deadline_text(expires_at: datetime, minutes: int) -> str:
+    """Show the real expiry, not a rounded-up minute that might mislead."""
+    word = "минуты" if minutes == 2 else "минут"
+    return (
+        f"Слот удерживается за вами {minutes} {word}, "
+        f"до {expires_at.astimezone(TZ):%H:%M:%S}."
+    )
 
 
 def _current_or_future_wash_bookings(
@@ -462,8 +486,8 @@ async def rebuild_waitlist_jobs() -> None:
         if str(context) == "night_pending":
             continue
 
-        # A Render restart can consume most or all of a two-minute night HOLD.
-        # Give the user a fresh two-minute response window after startup instead
+        # A Render restart can consume most or all of an active night HOLD.
+        # Give the user a fresh response window after startup instead
         # of treating infrastructure downtime as a refusal.
         if str(context) == "night":
             created = _dt(created_at)
@@ -1272,7 +1296,7 @@ async def _reserve_night_hold(
 
     The row is status=active immediately, so the slot is protected from normal
     booking and redistribution across Render restarts. The user gets the actual
-    two-minute response window only when the second phase activates it.
+    response window only when the second phase activates it.
     """
     expires = hold_run_at + timedelta(minutes=HOLD_MINUTES)
     now = datetime.now(TZ)
@@ -1361,7 +1385,7 @@ async def _activate_pending_night_hold(hold_id: int) -> bool:
         f"📅 {pretty_date(str(date_iso))}\n"
         f"🕐 {int(hour):02d}:00\n"
         f"🧺 {machine_name}\n\n"
-        f"Слот зарезервирован за вами на {HOLD_MINUTES} минуты."
+        _hold_deadline_text(expires, HOLD_MINUTES)
     )
     try:
         await BOT.send_message(
@@ -1396,10 +1420,10 @@ async def _create_hold(
         return
 
     now = datetime.now(TZ)
-    slot_start = _slot_start(date_iso, hour)
-    expires = min(now + timedelta(minutes=HOLD_MINUTES), slot_start)
-    if expires <= now:
-        return
+    minutes = _hold_duration_minutes(date_iso, hour, now)
+    if minutes is None:
+        return False
+    expires = now + timedelta(minutes=minutes)
 
     with get_conn() as conn:
         existing = conn.execute(
@@ -1445,12 +1469,7 @@ async def _create_hold(
                 return
             hold_id = int(row[0])
 
-    full_hold = expires >= now + timedelta(minutes=HOLD_MINUTES)
-    hold_text = (
-        f"Слот зарезервирован за вами на {HOLD_MINUTES} минуты."
-        if full_hold
-        else "Слот зарезервирован за вами до начала стирки."
-    )
+    hold_text = _hold_deadline_text(expires, minutes)
 
     kb = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="✅ Записаться", callback_data=f"wl_accept_{hold_id}"),
@@ -1527,7 +1546,12 @@ async def _distribute_date_locked(
         r for r in requests
         if r.id not in recent_requests and r.accepts_date(date_iso)
     ]
-    slots = _free_slots(date_iso)
+    # Under five minutes a fresh offer cannot be acted on safely.
+    now_for_slots = datetime.now(TZ)
+    slots = [
+        (mid, hour) for mid, hour in _free_slots(date_iso)
+        if _hold_duration_minutes(date_iso, hour, now_for_slots) is not None
+    ]
     if not slots:
         return 0
     matches = _match(requests, slots, date_iso=date_iso) if requests else {}
@@ -1957,7 +1981,11 @@ async def accept_hold(hold_id: int, tg_id: int):
 async def offer_earlier_for_date(date_iso: str) -> int:
     if BOT is None or not WAITLIST_ENABLED:
         return 0
-    slots = _free_slots(date_iso)
+    now_for_slots = datetime.now(TZ)
+    slots = [
+        (mid, hour) for mid, hour in _free_slots(date_iso)
+        if _hold_duration_minutes(date_iso, hour, now_for_slots) is not None
+    ]
     if not slots:
         return 0
 
@@ -2071,9 +2099,9 @@ async def offer_earlier_for_date(date_iso: str) -> int:
             ).fetchone()
         if rejected:
             continue
-        await _create_move_hold(req, mid, date_iso, hour, req.current_booking_id)
-        used_users.add(req.id)
-        offered += 1
+        if await _create_move_hold(req, mid, date_iso, hour, req.current_booking_id):
+            used_users.add(req.id)
+            offered += 1
     return offered
 
 
@@ -2083,9 +2111,14 @@ async def _create_move_hold(
     date_iso: str,
     hour: int,
     current_booking_id: int,
-) -> None:
+) -> bool:
     if BOT is None:
-        return
+        return False
+    now = datetime.now(TZ)
+    minutes = _hold_duration_minutes(date_iso, hour, now)
+    if minutes is None:
+        return False
+    expires = now + timedelta(minutes=minutes)
     with get_conn() as conn:
         machine = conn.execute("SELECT name FROM machines WHERE id=?", (int(machine_id),)).fetchone()
         current = conn.execute(
@@ -2094,7 +2127,6 @@ async def _create_move_hold(
         ).fetchone()
         if not machine or not current:
             return
-        expires = datetime.now(TZ) + timedelta(minutes=HOLD_MINUTES)
         cur = conn.execute(
             """
             INSERT INTO slot_holds
@@ -2122,7 +2154,7 @@ async def _create_move_hold(
         "🔄 <b>Можно перенести стирку раньше</b>\n\n"
         f"Сейчас: {pretty_date(str(current[1]))}, {int(current[2]):02d}:00, {current[0]}\n"
         f"Освободилось: {pretty_date(date_iso)}, {int(hour):02d}:00, {machine[0]}\n\n"
-        f"Новый слот удерживается {HOLD_MINUTES} минуты."
+        _hold_deadline_text(expires, minutes)
     )
     try:
         await BOT.send_message(
@@ -2130,6 +2162,8 @@ async def _create_move_hold(
             disable_notification=_quiet_for(req.user_id),
         )
         _schedule_hold_expiry(int(hold_id), expires)
+        return True
     except Exception:
         with get_conn() as conn:
             conn.execute("UPDATE slot_holds SET status='expired' WHERE id=?", (int(hold_id),))
+        return False
