@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from html import escape
 from zoneinfo import ZoneInfo
 
 from aiogram import Router, F, types
@@ -57,6 +58,8 @@ class CancelFlow(StatesGroup):
 
 class WaitFlow(StatesGroup):
     menu = State()
+    edit_menu = State()
+    disable_confirm = State()
     schedule_mode = State()
     interval_start = State()
     interval_end = State()
@@ -373,7 +376,10 @@ async def my_bookings(msg: types.Message, state: FSMContext):
             f"🕐 {hour:02d}:00",
             "",
         ]
-    await msg.answer("\n".join(lines).rstrip(), parse_mode="HTML", reply_markup=main_kb(msg.from_user.id))
+    await msg.answer(
+        "\n".join(lines).rstrip(), parse_mode="HTML",
+        reply_markup=reply_menu([["❌ Отменить запись"], ["🏠 Главное меню"]]),
+    )
 
 
 @router.message(Command("cancel"))
@@ -405,13 +411,13 @@ async def cancel_choose(msg: types.Message, state: FSMContext):
     await state.update_data(cancel_id=int(bid))
     await msg.answer(
         "Точно отменить эту запись?",
-        reply_markup=reply_menu([["✅ Да, отменить", "❌ Нет"]]),
+        reply_markup=reply_menu([["✅ Да, отменить", "❌ Нет"], ["🏠 Главное меню"]]),
     )
 
 
 @router.message(CancelFlow.confirm)
 async def cancel_confirm(msg: types.Message, state: FSMContext):
-    if msg.text == "❌ Нет":
+    if msg.text in {"❌ Нет", "🏠 Главное меню"}:
         return await show_home(msg, state)
     if msg.text != "✅ Да, отменить":
         return await msg.answer("Выберите действие кнопкой ниже.")
@@ -568,59 +574,139 @@ def _load_waitlist_form(tg_id: int) -> dict:
     }
 
 
-def _waitlist_summary(tg_id: int) -> str:
+def _compact_schedule(schedule: dict[int, list[tuple[int, int]]]) -> str:
+    groups = {}
+    for day in sorted(schedule):
+        intervals = tuple(schedule[day])
+        groups.setdefault(intervals, []).append(day)
+    lines = []
+    for intervals, days in groups.items():
+        weekday_text = "Каждый день" if days == list(range(7)) else ", ".join(
+            WEEKDAY_SHORT[day] for day in days
+        )
+        hours = _format_intervals(list(intervals)).replace("-", "–")
+        lines.append(f"📆 {weekday_text} · {hours}")
+    return "\n".join(lines)
+
+
+async def _waitlist_summary(tg_id: int) -> str:
     req = get_active_request_for_tg(tg_id)
     if not req:
         return ""
-    rid, mode, any_machine, _created_at, _priority_since = req
+    rid, mode, any_machine, _created_at, priority_since = req
     with get_conn() as conn:
         schedule_rows = conn.execute(
-            """
-            SELECT weekday,start_hour,end_hour
-            FROM waitlist_schedule
-            WHERE request_id=?
-            ORDER BY weekday,start_hour
-            """,
+            "SELECT weekday,start_hour,end_hour FROM waitlist_schedule "
+            "WHERE request_id=? ORDER BY weekday,start_hour",
             (int(rid),),
         ).fetchall()
-        machines = conn.execute(
-            """
-            SELECT m.name FROM waitlist_machines wm
-            JOIN machines m ON m.id=wm.machine_id
-            WHERE wm.request_id=? ORDER BY m.name
-            """,
-            (int(rid),),
-        ).fetchall()
-
         if schedule_rows:
             schedule = _schedule_from_rows(schedule_rows)
         else:
-            intervals = [
-                (int(a), int(b))
-                for a, b in conn.execute(
-                    "SELECT start_hour,end_hour FROM waitlist_intervals WHERE request_id=? ORDER BY start_hour",
-                    (int(rid),),
-                ).fetchall()
-            ]
-            weekdays = [
-                int(r[0])
-                for r in conn.execute(
-                    "SELECT weekday FROM waitlist_weekdays WHERE request_id=? ORDER BY weekday",
-                    (int(rid),),
-                ).fetchall()
-            ]
-            schedule = {day: list(intervals) for day in (weekdays or list(range(7)))}
+            schedule = _load_waitlist_form(tg_id).get("schedule", {})
+        machines = conn.execute(
+            "SELECT m.name FROM waitlist_machines wm JOIN machines m ON m.id=wm.machine_id "
+            "WHERE wm.request_id=? ORDER BY m.name",
+            (int(rid),),
+        ).fetchall()
+        state_row = conn.execute(
+            """
+            SELECT wr.status,b.date,b.hour,m.name
+            FROM waitlist_requests wr
+            LEFT JOIN bookings b ON b.id=wr.matched_booking_id
+            LEFT JOIN machines m ON m.id=b.machine_id
+            WHERE wr.id=?
+            """,
+            (int(rid),),
+        ).fetchone()
+        user = get_user(tg_id)
+        hold = conn.execute(
+            """
+            SELECT sh.id,sh.date,sh.hour,sh.expires_at,m.name
+            FROM slot_holds sh JOIN machines m ON m.id=sh.machine_id
+            WHERE sh.user_id=? AND sh.status='active' AND sh.context!='night_pending'
+            ORDER BY sh.expires_at LIMIT 1
+            """,
+            (int(user[0]),),
+        ).fetchone() if user else None
 
-    machine_text = "Любая стиральная машина" if any_machine else ", ".join(str(x[0]) for x in machines)
-    mode_text = "Автозапись" if mode == "auto" else "Сначала спросить"
-    state_text = _subscription_state_text(int(rid))
-    return (
-        "🔔 <b>Подписка на стирку</b>\n\n"
-        f"{_format_schedule(schedule)}\n\n"
-        f"🧺 {machine_text}\n"
-        f"⚡ Режим: {mode_text}\n\n"
-        f"{state_text}"
+    machine_text = (
+        "Любая машинка" if any_machine
+        else ", ".join(escape(str(row[0])) for row in machines)
     )
+    mode_text = "Автоматическая запись" if mode == "auto" else "Сначала спросить"
+    settings = (
+        "\n\n<b>Ваши настройки</b>\n"
+        f"{_compact_schedule(schedule)}\n"
+        f"🧺 {machine_text}\n"
+        f"{'⚡' if mode == 'auto' else '🔔'} {mode_text}"
+    )
+    heading = "🔔 <b>Моя подписка</b>\n\n"
+    status = str(state_row[0]) if state_row else "active"
+    now = datetime.now(TZ)
+    if hold:
+        expires = datetime.fromisoformat(str(hold[3]))
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=TZ)
+        if expires > now:
+            hold_date = hold[1].isoformat() if hasattr(hold[1], "isoformat") else str(hold[1])
+            return (
+                heading
+                + "<b>Ожидает вашего подтверждения</b>\n\n"
+                + f"📅 {date_text(hold_date)}, {int(hold[2]):02d}:00\n"
+                + f"🧺 {escape(str(hold[4]))}\n\n"
+                + f"Слот удерживается до <b>{expires:%H:%M}</b>."
+                + settings
+            )
+
+    if status in {"matched", "paused"} and state_row[1] is not None:
+        wash_date = (
+            state_row[1].isoformat()
+            if hasattr(state_row[1], "isoformat") else str(state_row[1])
+        )
+        label = (
+            "Запись получена" if status == "matched"
+            else "Подписка временно ожидает окончания вашей стирки"
+        )
+        return (
+            heading + f"<b>{label}</b>\n\n"
+            + "<b>Ваша следующая стирка</b>\n"
+            + f"{date_text(wash_date)}, {int(state_row[2]):02d}:00\n"
+            + f"🧺 {escape(str(state_row[3]))}\n\n"
+            + "После окончания стирки подписка автоматически возобновится "
+            + "с новым отсчётом приоритета."
+            + settings
+        )
+    if status != "active":
+        return heading + "Подписка сохранена. Ожидает возобновления." + settings
+
+    lines = [heading, "Подписка активна\n"]
+    try:
+        from forecast_service import get_forecast
+        forecast = await get_forecast(int(rid))
+    except Exception:
+        # The forecast is informative only. Never make the subscription
+        # screen fail or block the actual booking flow.
+        forecast = None
+    if forecast is not None:
+        lines += [
+            "<b>Ваш приоритет</b>",
+            f"<b>{int(forecast['score'])} баллов</b>",
+            f"Выше, чем у {int(forecast['percent'])}% ожидающих\n",
+            "<b>Прогноз получения места</b>",
+            escape(str(forecast["chance"])),
+            "\n📅 <b>Ориентировочная дата стирки</b>",
+            f"<b>{escape(str(forecast['date']))}</b>",
+            "Прогноз по текущей очереди и расписанию\n",
+            f"Подходящих часов: <b>{int(forecast['hours'])}</b>",
+            f"Сейчас ожидают: <b>{int(forecast['waiting'])} человек</b>",
+        ]
+    else:
+        lines += [
+            "<b>Ваш приоритет</b>",
+            "Прогноз временно недоступен. Подписка продолжает работать.",
+        ]
+    return "\n".join(lines) + settings
 
 
 @router.message(F.text.startswith("🔔 Лист ожидания"))
@@ -636,18 +722,34 @@ async def waitlist_home(msg: types.Message, state: FSMContext):
     user = get_user(msg.from_user.id)
     if not user or not user[2] or not user[3]:
         return await msg.answer("Сначала завершите регистрацию через /start.")
-    summary = _waitlist_summary(msg.from_user.id)
+    summary = await _waitlist_summary(msg.from_user.id)
     if summary:
         rows = [
-            ["✏️ Изменить заявку"],
-            ["❌ Отменить заявку"],
+            ["✏️ Изменить подписку"],
             ["⚙️ Настройки уведомлений"],
-            ["ℹ️ Как работает лист ожидания"],
+            ["❌ Отключить подписку"],
             ["🏠 Главное меню"],
         ]
+        with get_conn() as conn:
+            user_id = int(user[0])
+            row = conn.execute(
+                "SELECT id FROM slot_holds WHERE user_id=? AND status='active' "
+                "AND context!='night_pending' AND expires_at>? ORDER BY expires_at LIMIT 1",
+                (user_id, datetime.now(TZ).isoformat(timespec="seconds")),
+            ).fetchone()
+        if row:
+            hold_id = int(row[0])
+            markup = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="✅ Записаться", callback_data=f"wl_accept_{hold_id}"),
+                InlineKeyboardButton(text="❌ Пропустить", callback_data=f"wl_decline_{hold_id}"),
+            ]])
+            await msg.answer(summary, parse_mode="HTML", reply_markup=markup)
+            return await msg.answer(
+                "Управление подпиской", reply_markup=reply_menu(rows)
+            )
         return await msg.answer(summary, parse_mode="HTML", reply_markup=reply_menu(rows))
     rows = [
-        ["➕ Создать заявку"],
+        ["➕ Создать подписку"],
         ["⚙️ Настройки уведомлений"],
         ["ℹ️ Как работает лист ожидания"],
         ["🏠 Главное меню"],
@@ -660,7 +762,7 @@ async def waitlist_home(msg: types.Message, state: FSMContext):
     )
 
 
-@router.message(F.text.in_({"➕ Создать заявку", "✏️ Изменить заявку"}))
+@router.message(F.text.in_({"➕ Создать подписку", "➕ Создать заявку", "✏️ Изменить заявку"}))
 async def waitlist_create(msg: types.Message, state: FSMContext):
     await state.clear()
     if not WAITLIST_ENABLED:
@@ -673,6 +775,7 @@ async def waitlist_create(msg: types.Message, state: FSMContext):
     current = _load_waitlist_form(msg.from_user.id) if is_edit else {}
     await state.update_data(
         is_edit=is_edit,
+        edit_target="all",
         schedule=current.get("schedule", {}),
         selected_machines=current.get("selected_machines", []),
         any_machine=current.get("any_machine", True),
@@ -682,6 +785,103 @@ async def waitlist_create(msg: types.Message, state: FSMContext):
         any_day=True,
     )
     await show_schedule_mode(msg, state)
+
+
+async def show_subscription_edit_menu(msg: types.Message, state: FSMContext):
+    await state.set_state(WaitFlow.edit_menu)
+    await msg.answer(
+        "✏️ <b>Изменить подписку</b>\n\nЧто хотите изменить?",
+        parse_mode="HTML",
+        reply_markup=reply_menu([
+            ["📆 Дни и время"],
+            ["🧺 Стиральные машинки"],
+            ["⚡ Способ записи"],
+            ["⬅️ Назад к подписке"],
+            ["🏠 Главное меню"],
+        ]),
+    )
+
+
+@router.message(F.text == "✏️ Изменить подписку")
+async def subscription_edit(msg: types.Message, state: FSMContext):
+    await state.clear()
+    if not get_active_request_for_tg(msg.from_user.id):
+        return await waitlist_home(msg, state)
+    await show_subscription_edit_menu(msg, state)
+
+
+@router.message(WaitFlow.edit_menu)
+async def subscription_edit_select(msg: types.Message, state: FSMContext):
+    if msg.text == "🏠 Главное меню":
+        return await show_home(msg, state)
+    if msg.text == "⬅️ Назад к подписке":
+        return await waitlist_home(msg, state)
+    targets = {
+        "📆 Дни и время": "schedule",
+        "🧺 Стиральные машинки": "machines",
+        "⚡ Способ записи": "mode",
+    }
+    target = targets.get(msg.text)
+    if not target:
+        return await msg.answer("Выберите раздел кнопкой ниже.")
+    current = _load_waitlist_form(msg.from_user.id)
+    if not current:
+        return await waitlist_home(msg, state)
+    await state.update_data(
+        is_edit=True, edit_target=target,
+        schedule=current.get("schedule", {}),
+        selected_machines=current.get("selected_machines", []),
+        any_machine=current.get("any_machine", True),
+        mode=current.get("mode", "auto"),
+        intervals=[], selected_weekdays=[], any_day=True,
+    )
+    if target == "schedule":
+        return await show_schedule_mode(msg, state)
+    if target == "machines":
+        return await show_waitlist_machines(msg, state)
+    await state.set_state(WaitFlow.mode)
+    await msg.answer(
+        "⚡ <b>Способ записи</b>\n\nВыберите режим:",
+        parse_mode="HTML",
+        reply_markup=reply_menu([
+            ["⚡ Записать автоматически"],
+            ["🔔 Сначала спросить"],
+            ["⬅️ Назад", "🏠 Главное меню"],
+        ]),
+    )
+
+
+async def show_quick_edit_confirmation(msg: types.Message, state: FSMContext):
+    data = await state.get_data()
+    schedule = _state_schedule(data)
+    if not schedule:
+        return await msg.answer("Укажите хотя бы один подходящий день.")
+    machines = "Любая машинка"
+    if not data.get("any_machine", True):
+        machine_ids = data.get("selected_machines", [])
+        if not machine_ids:
+            return await msg.answer("Выберите хотя бы одну стиральную машинку.")
+        with get_conn() as conn:
+            marks = ",".join("?" for _ in machine_ids)
+            rows = conn.execute(
+                f"SELECT name FROM machines WHERE id IN ({marks}) ORDER BY name",
+                tuple(int(x) for x in machine_ids),
+            ).fetchall()
+        machines = ", ".join(escape(str(row[0])) for row in rows)
+    await state.set_state(WaitFlow.confirm)
+    await msg.answer(
+        "✏️ <b>Подтвердите изменения</b>\n\n"
+        + _compact_schedule(schedule) + "\n"
+        + f"🧺 {machines}\n"
+        + ("⚡ Автоматическая запись" if data.get("mode") == "auto"
+           else "🔔 Сначала спросить")
+        + "\n\nНакопленный приоритет сохранится.",
+        parse_mode="HTML",
+        reply_markup=reply_menu([
+            ["✅ Сохранить заявку"],
+            ["⬅️ Назад", "🏠 Главное меню"],
+        ]),
+    )
 
 
 async def show_schedule_mode(msg: types.Message, state: FSMContext):
@@ -897,6 +1097,8 @@ async def waitlist_weekdays(msg: types.Message, state: FSMContext):
         days = list(range(7)) if any_day else sorted(selected)
         schedule = {day: list(intervals) for day in days}
         await state.update_data(schedule=schedule)
+        if data.get("edit_target") == "schedule":
+            return await show_quick_edit_confirmation(msg, state)
         return await show_waitlist_machines(msg, state)
 
     if msg.text in {"✅ Любой день", "⬜ Любой день"}:
@@ -951,8 +1153,11 @@ async def waitlist_schedule_days(msg: types.Message, state: FSMContext):
         await state.update_data(schedule_mode="common", intervals=[], selected_weekdays=[], any_day=True)
         return await show_common_intervals(msg, state)
     if msg.text == "✅ Продолжить":
-        if not _state_schedule(await state.get_data()):
+        data = await state.get_data()
+        if not _state_schedule(data):
             return await msg.answer("Настройте хотя бы один день.")
+        if data.get("edit_target") == "schedule":
+            return await show_quick_edit_confirmation(msg, state)
         return await show_waitlist_machines(msg, state)
 
     raw = (msg.text or "").replace("✅ ", "").replace("⬜ ", "")
@@ -1112,6 +1317,8 @@ async def waitlist_machines(msg: types.Message, state: FSMContext):
 
     data = await state.get_data()
     if msg.text == "⬅️ Назад":
+        if data.get("edit_target") == "machines":
+            return await show_subscription_edit_menu(msg, state)
         if data.get("schedule_mode") == "common":
             return await show_waitlist_weekdays(msg, state)
         return await show_schedule_days(msg, state)
@@ -1119,6 +1326,8 @@ async def waitlist_machines(msg: types.Message, state: FSMContext):
     if msg.text == "✅ Продолжить":
         if not data.get("any_machine") and not data.get("selected_machines"):
             return await msg.answer("Выберите хотя бы одну машинку.")
+        if data.get("edit_target") == "machines":
+            return await show_quick_edit_confirmation(msg, state)
         await state.set_state(WaitFlow.mode)
         return await msg.answer(
             "⚡ Что сделать, если найдётся место?\n\n"
@@ -1159,6 +1368,8 @@ async def waitlist_mode(msg: types.Message, state: FSMContext):
     if msg.text == "🏠 Главное меню":
         return await show_home(msg, state)
     if msg.text == "⬅️ Назад":
+        if (await state.get_data()).get("edit_target") == "mode":
+            return await show_subscription_edit_menu(msg, state)
         return await show_waitlist_machines(msg, state)
 
     if msg.text == "⚡ Записать автоматически":
@@ -1174,6 +1385,8 @@ async def waitlist_mode(msg: types.Message, state: FSMContext):
         return await msg.answer("Сначала настройте расписание.")
 
     await state.update_data(mode=mode)
+    if data.get("edit_target") == "mode":
+        return await show_quick_edit_confirmation(msg, state)
     if data.get("any_machine"):
         machines = "Любая стиральная машина"
     else:
@@ -1204,6 +1417,8 @@ async def waitlist_confirm(msg: types.Message, state: FSMContext):
     if msg.text == "🏠 Главное меню":
         return await show_home(msg, state)
     if msg.text == "⬅️ Назад":
+        if (await state.get_data()).get("edit_target") not in {None, "all"}:
+            return await show_subscription_edit_menu(msg, state)
         await state.set_state(WaitFlow.mode)
         return await msg.answer("Выберите режим.")
 
@@ -1245,10 +1460,35 @@ async def waitlist_confirm(msg: types.Message, state: FSMContext):
     await check_active_waitlist()
 
 
-@router.message(F.text == "❌ Отменить заявку")
+@router.message(F.text.in_({"❌ Отключить подписку", "❌ Отменить заявку"}))
 async def waitlist_cancel(msg: types.Message, state: FSMContext):
+    if not get_active_request_for_tg(msg.from_user.id):
+        return await waitlist_home(msg, state)
     await state.clear()
+    await state.set_state(WaitFlow.disable_confirm)
+    await msg.answer(
+        "❌ <b>Отключить подписку?</b>\n\n"
+        "Вы перестанете участвовать в очереди и потеряете накопленное ожидание. "
+        "Уже созданные записи не отменятся.",
+        parse_mode="HTML",
+        reply_markup=reply_menu([
+            ["✅ Да, отключить"],
+            ["❌ Нет, оставить"],
+            ["🏠 Главное меню"],
+        ]),
+    )
+
+
+@router.message(WaitFlow.disable_confirm)
+async def waitlist_cancel_confirm(msg: types.Message, state: FSMContext):
+    if msg.text == "🏠 Главное меню":
+        return await show_home(msg, state)
+    if msg.text == "❌ Нет, оставить":
+        return await waitlist_home(msg, state)
+    if msg.text != "✅ Да, отключить":
+        return await msg.answer("Подтвердите действие кнопкой ниже.")
     ok = cancel_request_for_tg(msg.from_user.id)
+    await state.clear()
     await msg.answer(
         "✅ Подписка отключена." if ok else "Активной подписки уже нет.",
         reply_markup=main_kb(msg.from_user.id),
@@ -1322,8 +1562,8 @@ HELP_TEXTS = {
         "📖 <b>Как пользоваться ботом</b>\n\n"
         "🧺 Записаться\nВыберите дату, машинку и свободное время. После выбора даты бот сразу покажет свободные часы всех работающих машин.\n\n"
         "📋 Мои записи\nПоказывает ваши предстоящие записи.\n\n"
-        "❌ Отменить запись\nВыберите запись, которую хотите отменить.\n\n"
-        "🔔 Лист ожидания\nМожно заранее указать удобное время и машинки, а бот сам будет искать подходящее свободное место.\n\n"
+        "❌ Отменить запись\nОткройте «Мои записи» и выберите отмену нужной записи.\n\n"
+        "🔔 Лист ожидания\nОткройте «Мою подписку», чтобы посмотреть приоритет, ориентировочную дату и настройки. Бот продолжает искать место автоматически.\n\n"
         "🌬️ Сушка\nСначала нужно записаться на стиральную машину. После записи бот предложит свободную сушилку на следующий час, если она есть. После этого сушилку также можно выбрать вручную.\n\n"
         "📅 Новая дата для обычной записи открывается каждый день в 00:00.\n\n"
         "Если заметили ошибку или что-то работает странно, напишите <b>@ilyinmax</b>.",
@@ -1340,13 +1580,17 @@ HELP_TEXTS = {
         "Например: Пн 10:00-22:00, Вт 18:00-22:00, а Чт 08:00-12:00 и 18:00-22:00. Настроенное время можно быстро скопировать на другие дни.\n\n"
         "⚡ Автозапись: бот сам занимает подходящее место, если до начала стирки осталось не меньше 30 минут. Если до стирки осталось 5–30 минут, бот сначала пришлёт срочное предложение и удержит его 2 минуты. При запасе 30 минут и больше предложение удерживается 5 минут. Менее чем за 5 минут новые HOLD не выдаются.\n\n"
         "🔔 Сначала спросить: бот предлагает конкретный слот и удерживает его 5 минут, а при запасе 5–30 минут — 2 минуты. В сообщении указано точное время окончания удержания.\n\n"
-        "Конкретную дату выбирать не нужно. Подписка остаётся сохранённой и после полученной стирки: после её окончания она автоматически снова начнёт участвовать в очереди с новым отсчётом приоритета.",
+        "Конкретную дату выбирать не нужно. В «Моей подписке» можно увидеть приоритет и примерную дату стирки. "
+        "Подписка остаётся сохранённой и после полученной стирки: после её окончания она автоматически снова начнёт участвовать в очереди с новым отсчётом приоритета. "
+        "Изменение настроек не сбрасывает накопленное ожидание.",
 
     "⚖️ Как работает очередь":
         "⚖️ <b>Как работает очередь</b>\n\n"
         "Если на одно место претендуют несколько человек, главный критерий - как давно человек ждёт с учётом его стирок за последние 30 дней.\n\n"
         "Если приоритет одинаковый, бот дополнительно учитывает количество подходящих вариантов и старается не отбирать редкий слот у человека с более узким расписанием.\n\n"
-        "Чем старше предыдущая стирка, тем меньше она влияет. Через 30 дней она перестаёт учитываться.",
+        "Чем старше предыдущая стирка, тем меньше она влияет. Через 30 дней она перестаёт учитываться.\n\n"
+        "Прогноз в «Моей подписке» рассчитывается приблизительно по текущим заявкам и расписаниям, без гарантии даты.\n"
+        "Изменение дней, часов, машинок или способа записи не сбрасывает накопленный приоритет.",
 
     "⏰ Напоминания и таймер":
         "⏰ <b>Напоминания и таймер</b>\n\n"

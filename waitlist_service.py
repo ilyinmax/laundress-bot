@@ -130,7 +130,7 @@ def _hold_deadline_text(expires_at: datetime, minutes: int) -> str:
     word = "минуты" if minutes == 2 else "минут"
     return (
         f"Слот удерживается за вами {minutes} {word}, "
-        f"до {expires_at.astimezone(TZ):%H:%M:%S}."
+        f"до {expires_at.astimezone(TZ):%H:%M}."
     )
 
 
@@ -700,6 +700,8 @@ def cancel_request_for_tg(tg_id: int) -> bool:
         _cancel_subscription_resume(request_id)
     for (hold_id,) in hold_rows:
         _cancel_hold_expiry(int(hold_id))
+    from forecast_service import invalidate_forecasts
+    invalidate_forecasts()
     return True
 
 
@@ -831,10 +833,8 @@ def save_request(
             # Editing days/hours or switching AUTO/notify must not erase waiting
             # time. Only changing machine eligibility resets an actively waiting
             # subscription. Paused subscriptions do not start priority early.
-            machine_conditions_changed = (
-                bool(old[2]) != bool(any_machine)
-                or old_machines != new_machines
-            )
+            # Machine preferences are editable without losing accrued waiting
+            # time, just like days/hours and AUTO/notify settings.
 
             if controlling_booking:
                 booking_id, booking_date, booking_hour, booking_end = controlling_booking
@@ -844,8 +844,7 @@ def save_request(
                 else:
                     status = 'matched'
                     priority_since = (
-                        now_s if (old_status == 'active' and machine_conditions_changed)
-                        else str(old[3])
+                        str(old[3])
                     )
                 matched_booking_id = int(booking_id)
             else:
@@ -853,9 +852,7 @@ def save_request(
                 matched_booking_id = None
                 if old_status == 'paused':
                     priority_since = now_s
-                elif old_status == 'active' and machine_conditions_changed:
-                    priority_since = now_s
-                else:
+                 else:
                     priority_since = str(old[3])
 
             conn.execute(
@@ -971,6 +968,9 @@ def save_request(
     else:
         _cancel_subscription_resume(int(request_id))
 
+    # Import lazily: forecast_service reads requests from this module.
+    from forecast_service import invalidate_forecasts
+    invalidate_forecasts()
     return int(request_id)
 
 
@@ -1154,8 +1154,10 @@ def _match(
     requests: list[Request],
     slots: list[tuple[int, int]],
     date_iso: str | None = None,
+    *,
+    now: datetime | None = None,
 ) -> dict[int, tuple[int, int]]:
-    now = datetime.now(TZ)
+    now = now or datetime.now(TZ)
     allowed: dict[int, list[tuple[int, int]]] = {}
     for req in requests:
         opts = [

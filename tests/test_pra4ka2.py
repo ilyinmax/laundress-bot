@@ -66,6 +66,84 @@ class Pra4ka2Tests(unittest.TestCase):
         self.assertIn("2 минуты", wl._hold_deadline_text(now + timedelta(minutes=2), 2))
 
 
+    def test_edit_machine_preferences_preserves_priority(self):
+        import waitlist_service as wl
+
+        machine = self.mid("Стиральная №1")
+        rid = wl.save_request(1001, [(18, 23)], [machine], False, "auto")
+        before = "2026-09-20T12:00:00+03:00"
+        with database.get_conn() as conn:
+            conn.execute(
+                "UPDATE waitlist_requests SET priority_since=? WHERE id=?",
+                (before, rid),
+            )
+        same = wl.save_request(1001, [(18, 23)], [], True, "auto")
+        self.assertEqual(same, rid)
+        with database.get_conn() as conn:
+            row = conn.execute(
+                "SELECT priority_since,any_machine FROM waitlist_requests WHERE id=?",
+                (rid,),
+            ).fetchone()
+        self.assertEqual(str(row[0]), before)
+        self.assertEqual(int(row[1]), 1)
+
+    def test_forecast_is_read_only_and_cached(self):
+        import forecast_service as fs
+        import waitlist_service as wl
+
+        fs.invalidate_forecasts()
+        today = datetime.now(TZ)
+        rid = wl.save_request(
+            1001, [], [], True, "auto",
+            schedule={day: [(7, 23)] for day in range(7)},
+        )
+        with database.get_conn() as conn:
+            before = conn.execute("SELECT COUNT(*) FROM bookings").fetchone()[0]
+        first = asyncio.run(fs.get_forecast(rid))
+        second = asyncio.run(fs.get_forecast(rid))
+        with database.get_conn() as conn:
+            after = conn.execute("SELECT COUNT(*) FROM bookings").fetchone()[0]
+        self.assertIsNotNone(first)
+        self.assertEqual(first, second)
+        self.assertEqual(int(before), int(after))
+        self.assertEqual(first["hours"], 16)
+        self.assertIn("score", first)
+        self.assertIn("date", first)
+        fs.invalidate_forecasts()
+
+    def test_subscription_summary_keeps_compact_settings(self):
+        import waitlist_service as wl
+        from handlers import pra4ka2 as ui
+        from unittest.mock import AsyncMock, patch
+
+        rid = wl.save_request(
+            1001, [], [], True, "auto",
+            schedule={0: [(18, 23)], 2: [(18, 23)], 4: [(18, 23)]},
+        )
+        forecast = {
+            "score": 78, "percent": 62, "waiting": 109, "hours": 5,
+            "chance": "🟢↗️ Шансы выше среднего", "date": "12–14 октября",
+        }
+        with patch("forecast_service.get_forecast", new=AsyncMock(return_value=forecast)):
+            output = asyncio.run(ui._waitlist_summary(1001))
+        self.assertIn("🔔 <b>Моя подписка</b>", output)
+        self.assertIn("Ваш приоритет", output)
+        self.assertNotIn("⭐", output)
+        self.assertIn("📆 Пн, Ср, Пт · 18:00–22:00", output)
+        self.assertIn("🧺 Любая машинка", output)
+        self.assertIn("⚡ Автоматическая запись", output)
+        self.assertIn("Прогноз по текущей очереди и расписанию", output)
+        self.assertEqual(rid, int(wl.get_active_request_for_tg(1001)[0]))
+
+    def test_hold_deadline_displays_minutes_only(self):
+        import waitlist_service as wl
+
+        expires = datetime.now(TZ).replace(microsecond=0, second=37)
+        text = wl._hold_deadline_text(expires, 5)
+        self.assertIn(expires.strftime("%H:%M"), text)
+        self.assertNotIn(expires.strftime("%H:%M:%S"), text)
+
+
     def test_repeated_waitlist_requests_and_matching(self):
         import waitlist_service as wl
 
