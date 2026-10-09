@@ -130,16 +130,39 @@ class Pra4ka2Tests(unittest.TestCase):
         self.assertIn("✅ <b>Подписка активна</b>", output)
         self.assertNotIn("Ваш приоритет", output)
         self.assertNotIn("баллов", output)
-        self.assertNotIn("Выше, чем у", output)
-        self.assertIn("Подходящих вариантов по времени: <b>5</b>", output)
-        self.assertIn("↗️ Шансы выше среднего", output)
-        self.assertLess(output.index("Ориентировочная дата стирки"), output.index("Шансы выше среднего"))
+        self.assertNotIn("Шансы выше среднего", output)
+        self.assertNotIn("Подходящих вариантов по времени", output)
+        self.assertIn("📊 <b>Приоритет в очереди</b>", output)
+        self.assertIn("Выше, чем у <b>62%</b> ожидающих.", output)
+        self.assertIn("Это не вероятность записи", output)
+        self.assertLess(output.index("Ориентировочная дата стирки"), output.index("Приоритет в очереди"))
         self.assertNotIn("⭐", output)
         self.assertIn("📆 Пн, Ср, Пт · 18:00–22:00", output)
         self.assertIn("🧺 Любая машинка", output)
         self.assertIn("⚡ Автоматическая запись", output)
         self.assertIn("Прогноз по текущей очереди и расписанию", output)
         self.assertEqual(rid, int(wl.get_active_request_for_tg(1001)[0]))
+
+    def test_subscription_summary_has_no_double_blank_after_heading(self):
+        import waitlist_service as wl
+        from handlers import pra4ka2 as ui
+        from unittest.mock import AsyncMock, patch
+
+        wl.save_request(
+            1001, [], [], True, "auto",
+            schedule={day: [(13, 23)] for day in range(7)},
+        )
+        forecast = {
+            "score": -48, "percent": 17, "waiting": 110, "hours": 10,
+            "chance": "↘️ Шансы ниже среднего", "date": "14 октября – 16 октября",
+        }
+        with patch("forecast_service.get_forecast", new=AsyncMock(return_value=forecast)):
+            output = asyncio.run(ui._waitlist_summary(1001))
+        self.assertTrue(
+            output.startswith("🔔 <b>Моя подписка</b>\n✅ <b>Подписка активна</b>\n\n")
+        )
+        self.assertNotIn("\n\n\n", output)
+
 
     def test_main_menu_is_vertical_and_waitlist_first(self):
         from keyboards import build_main_menu

@@ -641,7 +641,7 @@ async def _waitlist_summary(tg_id: int) -> str:
         f"🧺 {machine_text}\n"
         f"{'⚡' if mode == 'auto' else '🔔'} {mode_text}"
     )
-    heading = "🔔 <b>Моя подписка</b>\n\n"
+    heading = "🔔 <b>Моя подписка</b>"
     status = str(state_row[0]) if state_row else "active"
     now = datetime.now(TZ)
     if hold:
@@ -652,7 +652,7 @@ async def _waitlist_summary(tg_id: int) -> str:
             hold_date = hold[1].isoformat() if hasattr(hold[1], "isoformat") else str(hold[1])
             return (
                 heading
-                + "<b>Ожидает вашего подтверждения</b>\n\n"
+                + "\n<b>Ожидает вашего подтверждения</b>\n\n"
                 + f"📅 {date_text(hold_date)}, {int(hold[2]):02d}:00\n"
                 + f"🧺 {escape(str(hold[4]))}\n\n"
                 + f"Слот удерживается до <b>{expires:%H:%M}</b>."
@@ -669,7 +669,7 @@ async def _waitlist_summary(tg_id: int) -> str:
             else "Подписка временно ожидает окончания вашей стирки"
         )
         return (
-            heading + f"<b>{label}</b>\n\n"
+            heading + f"\n<b>{label}</b>\n\n"
             + "<b>Ваша следующая стирка</b>\n"
             + f"{date_text(wash_date)}, {int(state_row[2]):02d}:00\n"
             + f"🧺 {escape(str(state_row[3]))}\n\n"
@@ -678,9 +678,13 @@ async def _waitlist_summary(tg_id: int) -> str:
             + settings
         )
     if status != "active":
-        return heading + "Подписка сохранена. Ожидает возобновления." + settings
+        return heading + "\nПодписка сохранена. Ожидает возобновления." + settings
 
-    lines = [heading, "✅ <b>Подписка активна</b>\n"]
+    lines = [
+        heading,
+        "✅ <b>Подписка активна</b>",
+        "",
+    ]
     try:
         from forecast_service import get_forecast
         forecast = await get_forecast(int(rid))
@@ -692,11 +696,13 @@ async def _waitlist_summary(tg_id: int) -> str:
         lines += [
             "📅 <b>Ориентировочная дата стирки</b>",
             f"<b>{escape(str(forecast['date']))}</b>",
-            "Прогноз по текущей очереди и расписанию.\n",
-            escape(str(forecast["chance"])),
+            "Расчёт по текущей очереди, вашему расписанию и свободным слотам.",
             "",
-            f"Подходящих вариантов по времени: <b>{int(forecast['hours'])}</b>",
-            f"Сейчас ожидают: <b>{int(forecast['waiting'])} человек</b>",
+            "📊 <b>Приоритет в очереди</b>",
+            f"Выше, чем у <b>{int(forecast['percent'])}%</b> ожидающих.",
+            "Это не вероятность записи: фактическое распределение также зависит от выбранных дней, времени и машинок.",
+            "",
+            f"👥 Сейчас в очереди: <b>{int(forecast['waiting'])} человек</b>",
         ]
     else:
         lines.append("Прогноз временно недоступен. Подписка продолжает работать.")
