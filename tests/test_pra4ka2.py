@@ -140,7 +140,7 @@ class Pra4ka2Tests(unittest.TestCase):
         self.assertIn("📆 Пн, Ср, Пт · 18:00–22:00", output)
         self.assertIn("🧺 Любая машинка", output)
         self.assertIn("⚡ Автоматическая запись", output)
-        self.assertIn("Прогноз по текущей очереди и расписанию", output)
+        self.assertIn("Расчёт по текущей очереди, вашему расписанию и свободным слотам.", output)
         self.assertEqual(rid, int(wl.get_active_request_for_tg(1001)[0]))
 
     def test_subscription_summary_has_no_double_blank_after_heading(self):
