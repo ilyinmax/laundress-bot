@@ -1674,13 +1674,11 @@ async def _distribute_date_locked(
             continue
 
         if wants_auto:
-            notice_factory = (
-                lambda result: _night_notification_payload(
+            notice_factory = None
+            if context == "night":
+                notice_factory = lambda result: _night_notification_payload(
                     result.date, result.hour, result.machine_name
                 )
-                if context == "night"
-                else None
-            )
             try:
                 result = await create_booking_safe(
                     req.user_id,
