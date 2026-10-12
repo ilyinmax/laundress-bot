@@ -4,6 +4,7 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
+from typing import Callable
 
 from config import TIMEZONE, WORKING_HOURS
 from database import DATABASE_URL, get_conn, is_admin, is_banned
@@ -257,7 +258,7 @@ async def create_booking_safe(
     *,
     allowed_hold_id: int | None = None,
     close_waitlist: bool = True,
-    pending_waitlist_notification: tuple[str, str, str] | None = None,
+    pending_waitlist_notification_factory: Callable[[BookingResult], tuple[str, str, str]] | None = None,
 ) -> BookingResult:
     async with _BOOKING_LOCK:
         conn = get_conn()
@@ -272,8 +273,8 @@ async def create_booking_safe(
                 allowed_hold_id=allowed_hold_id,
                 close_waitlist=close_waitlist,
             )
-            if pending_waitlist_notification is not None:
-                text, send_at, created_at = pending_waitlist_notification
+            if pending_waitlist_notification_factory is not None:
+                text, send_at, created_at = pending_waitlist_notification_factory(result)
                 conn.execute(
                     """
                     INSERT INTO pending_waitlist_notifications
