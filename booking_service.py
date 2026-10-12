@@ -257,6 +257,7 @@ async def create_booking_safe(
     *,
     allowed_hold_id: int | None = None,
     close_waitlist: bool = True,
+    pending_waitlist_notification: tuple[str, str, str] | None = None,
 ) -> BookingResult:
     async with _BOOKING_LOCK:
         conn = get_conn()
@@ -271,6 +272,23 @@ async def create_booking_safe(
                 allowed_hold_id=allowed_hold_id,
                 close_waitlist=close_waitlist,
             )
+            if pending_waitlist_notification is not None:
+                text, send_at, created_at = pending_waitlist_notification
+                conn.execute(
+                    """
+                    INSERT INTO pending_waitlist_notifications
+                    (user_id,booking_id,text,send_at,sent,created_at)
+                    VALUES (?,?,?,?,0,?)
+                    ON CONFLICT (booking_id) DO NOTHING
+                    """,
+                    (
+                        int(result.user_id),
+                        int(result.booking_id),
+                        str(text),
+                        str(send_at),
+                        str(created_at),
+                    ),
+                )
             _commit(raw)
 
             if result.machine_type == "wash" and close_waitlist:
