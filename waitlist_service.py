@@ -599,23 +599,40 @@ async def rebuild_waitlist_jobs() -> None:
                     ),
                 )
 
-    # Rebuild the durable second phase of a night round after a restart.
+    # Rebuild unfinished night rounds after a restart. A round can die either
+    # during matching or after matching while HOLDs are pending/running.
     with get_conn() as conn:
-        pending_rounds = conn.execute(
+        unfinished_rounds = conn.execute(
             """
             SELECT target_date,cutoff_at,status
             FROM waitlist_rounds
-            WHERE status IN ('holds_pending','holds_running')
+            WHERE status IN ('matching','holds_pending','holds_running')
             ORDER BY target_date
             """
         ).fetchall()
-    for target_date, cutoff_at, status in pending_rounds:
+
+    from apscheduler.triggers.date import DateTrigger
+    from scheduler import scheduler
+
+    for target_date, cutoff_at, status in unfinished_rounds:
+        target_date = str(target_date)
+        if str(status) == "matching":
+            scheduler.add_job(
+                process_night_round,
+                trigger=DateTrigger(run_date=now + timedelta(seconds=1)),
+                id=f"waitlist_night_matching_resume_{target_date}",
+                args=[target_date],
+                replace_existing=True,
+                misfire_grace_time=3600,
+            )
+            continue
+
         try:
             planned = _dt(cutoff_at) + timedelta(seconds=90)
         except Exception:
             planned = now + timedelta(seconds=1)
         _schedule_night_hold_phase(
-            str(target_date),
+            target_date,
             max(planned, now + timedelta(seconds=1)),
         )
 
@@ -1724,7 +1741,7 @@ async def _distribute_date_locked(
     return count
 
 
-async def process_night_round() -> None:
+async def process_night_round(target_date: str | None = None) -> None:
     """
     Fair night round in two execution phases.
 
@@ -1739,7 +1756,11 @@ async def process_night_round() -> None:
         return
 
     now = datetime.now(TZ)
-    target = (now.date() + timedelta(days=3)).isoformat()
+    target = (
+        str(target_date)
+        if target_date is not None
+        else (now.date() + timedelta(days=3)).isoformat()
+    )
     cutoff = now.replace(hour=23, minute=0, second=0, microsecond=0)
     hold_run_at = cutoff + timedelta(seconds=90)
 
