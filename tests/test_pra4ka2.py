@@ -448,6 +448,131 @@ class Pra4ka2Tests(unittest.TestCase):
         )
 
 
+    def test_night_auto_notification_is_atomic_with_booking(self):
+        from booking_service import SlotBusy, create_booking_safe
+        import waitlist_service as wl
+
+        uid = self.uid(1001)
+        mid = self.mid("Стиральная №1")
+        target = (datetime.now(TZ).date() + timedelta(days=3)).isoformat()
+
+        result = asyncio.run(
+            create_booking_safe(
+                uid,
+                mid,
+                target,
+                18,
+                pending_waitlist_notification_factory=(
+                    lambda booking: wl._night_notification_payload(
+                        booking.date, booking.hour, booking.machine_name
+                    )
+                ),
+            )
+        )
+        with database.get_conn() as conn:
+            notice = conn.execute(
+                """
+                SELECT booking_id,sent
+                FROM pending_waitlist_notifications
+                WHERE booking_id=?
+                """,
+                (result.booking_id,),
+            ).fetchone()
+        self.assertIsNotNone(notice)
+        self.assertEqual(int(notice[0]), result.booking_id)
+        self.assertEqual(int(notice[1]), 0)
+
+        uid2 = self.uid(1002)
+        with self.assertRaises(SlotBusy):
+            asyncio.run(
+                create_booking_safe(
+                    uid2,
+                    mid,
+                    target,
+                    20,
+                    pending_waitlist_notification_factory=(
+                        lambda _booking: (_ for _ in ()).throw(
+                            RuntimeError("outbox write failed")
+                        )
+                    ),
+                )
+            )
+        with database.get_conn() as conn:
+            rolled_back = conn.execute(
+                """
+                SELECT 1 FROM bookings
+                WHERE user_id=? AND machine_id=? AND date=? AND hour=?
+                """,
+                (uid2, mid, target, 20),
+            ).fetchone()
+        self.assertIsNone(rolled_back)
+
+    def test_startup_repairs_missing_future_night_auto_notice_once(self):
+        from booking_service import create_booking_safe
+        import waitlist_service as wl
+
+        mid = self.mid("Стиральная №1")
+        uid = self.uid(1001)
+        wl.save_request(
+            1001,
+            [],
+            [],
+            True,
+            "auto",
+            schedule={day: [(7, 23)] for day in range(7)},
+        )
+        now = datetime.now(TZ).replace(microsecond=0)
+        target = (now.date() + timedelta(days=3)).isoformat()
+        with database.get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO waitlist_rounds
+                (target_date,cutoff_at,started_at,status)
+                VALUES (?,?,?,'matching')
+                """,
+                (
+                    target,
+                    now.isoformat(timespec="seconds"),
+                    (now - timedelta(seconds=1)).isoformat(timespec="seconds"),
+                ),
+            )
+
+        booking = asyncio.run(create_booking_safe(uid, mid, target, 19))
+        with database.get_conn() as conn:
+            self.assertIsNone(
+                conn.execute(
+                    "SELECT 1 FROM pending_waitlist_notifications WHERE booking_id=?",
+                    (booking.booking_id,),
+                ).fetchone()
+            )
+
+        repaired = wl.repair_missing_night_auto_notifications(
+            now=datetime.now(TZ) + timedelta(seconds=1)
+        )
+        with database.get_conn() as conn:
+            notices = conn.execute(
+                """
+                SELECT COUNT(*) FROM pending_waitlist_notifications
+                WHERE booking_id=?
+                """,
+                (booking.booking_id,),
+            ).fetchone()[0]
+        self.assertEqual(int(notices), 1)
+
+        wl.repair_missing_night_auto_notifications(
+            now=datetime.now(TZ) + timedelta(seconds=2)
+        )
+        with database.get_conn() as conn:
+            notices_again = conn.execute(
+                """
+                SELECT COUNT(*) FROM pending_waitlist_notifications
+                WHERE booking_id=?
+                """,
+                (booking.booking_id,),
+            ).fetchone()[0]
+        self.assertEqual(int(notices_again), 1)
+
+
     def test_night_cutoff_excludes_late_requests(self):
         import waitlist_service as wl
 
