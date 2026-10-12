@@ -1292,7 +1292,7 @@ def repair_missing_night_auto_notifications(
         with get_conn() as conn:
             rows = conn.execute(
                 """
-                SELECT b.id,b.user_id,m.name,b.date,b.hour
+                SELECT b.id,b.user_id,m.name,b.date,b.hour,b.created_at
                 FROM bookings b
                 JOIN machines m ON m.id=b.machine_id
                 JOIN waitlist_requests wr ON wr.matched_booking_id=b.id
@@ -1309,18 +1309,24 @@ def repair_missing_night_auto_notifications(
                   AND wr.mode='auto'
                   AND p.id IS NULL
                   AND h.id IS NULL
-                  AND b.created_at>=?
-                  AND b.created_at<=?
                 ORDER BY b.id
                 """,
-                (
-                    str(target_date),
-                    str(started_at),
-                    end_at.isoformat(timespec="seconds"),
-                ),
+                (str(target_date),),
             ).fetchall()
 
-        for booking_id, user_id, machine_name, date_value, hour in rows:
+        round_start = _dt(started_at)
+        for booking_id, user_id, machine_name, date_value, hour, created_at in rows:
+            try:
+                created_dt = datetime.fromisoformat(str(created_at))
+                if created_dt.tzinfo is None:
+                    # SQLite strftime() stores booking creation in UTC.
+                    created_dt = created_dt.replace(tzinfo=ZoneInfo("UTC"))
+                created_dt = created_dt.astimezone(TZ)
+            except Exception:
+                continue
+            if created_dt < round_start or created_dt > end_at:
+                continue
+
             date_iso = (
                 date_value.isoformat()
                 if hasattr(date_value, "isoformat")
@@ -1347,8 +1353,7 @@ def repair_missing_night_auto_notifications(
                         payload[2],
                     ),
                 )
-                if getattr(cur, "rowcount", None) not in (0, None):
-                    repaired += 1
+                repaired += 1
 
     return repaired
 
