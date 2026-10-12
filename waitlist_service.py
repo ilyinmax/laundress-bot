@@ -1249,9 +1249,10 @@ def _night_notification_payload(
     machine_name: str,
     *,
     now: datetime | None = None,
+    send_at: datetime | None = None,
 ) -> tuple[str, str, str]:
     now = now or datetime.now(TZ)
-    send_at = (now + timedelta(days=1)).replace(
+    send_at = send_at or (now + timedelta(days=1)).replace(
         hour=0, minute=0, second=2, microsecond=0
     )
     return (
@@ -1334,8 +1335,15 @@ def repair_missing_night_auto_notifications(
             )
             if _slot_start(date_iso, int(hour)) <= now:
                 continue
+            original_send_at = (round_start + timedelta(days=1)).replace(
+                hour=0, minute=0, second=2, microsecond=0
+            )
             payload = _night_notification_payload(
-                date_iso, int(hour), str(machine_name), now=now
+                date_iso,
+                int(hour),
+                str(machine_name),
+                now=now,
+                send_at=original_send_at,
             )
             with get_conn() as conn:
                 cur = conn.execute(
