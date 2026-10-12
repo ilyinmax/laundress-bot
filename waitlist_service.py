@@ -619,6 +619,7 @@ async def rebuild_waitlist_jobs() -> None:
             max(planned, now + timedelta(seconds=1)),
         )
 
+    repair_missing_night_auto_notifications(now=now)
     schedule_next_pending_notification()
     await check_active_waitlist()
 
@@ -1232,33 +1233,163 @@ async def _schedule_booking_features(result) -> None:
     await schedule_reminder(int(tg[0]), result.machine_name, result.date, result.hour, 30)
 
 
-async def _send_auto_confirmation(req: Request, result, *, night: bool) -> None:
-    if BOT is None:
-        return
-    text = (
+def _auto_confirmation_text(date_iso: str, hour: int, machine_name: str) -> str:
+    return (
         "✅ <b>Вы записаны</b>\n\n"
-        f"📅 {pretty_date(result.date)}\n"
-        f"🕐 {result.hour:02d}:00\n"
-        f"🧺 {result.machine_name}\n\n"
+        f"📅 {pretty_date(date_iso)}\n"
+        f"🕐 {int(hour):02d}:00\n"
+        f"🧺 {machine_name}\n\n"
         "Бот нашёл подходящее время через лист ожидания."
     )
+
+
+def _night_notification_payload(
+    date_iso: str,
+    hour: int,
+    machine_name: str,
+    *,
+    now: datetime | None = None,
+    send_at: datetime | None = None,
+) -> tuple[str, str, str]:
+    now = now or datetime.now(TZ)
+    send_at = send_at or (now + timedelta(days=1)).replace(
+        hour=0, minute=0, second=2, microsecond=0
+    )
+    return (
+        _auto_confirmation_text(date_iso, int(hour), machine_name),
+        send_at.isoformat(timespec="seconds"),
+        now.isoformat(timespec="seconds"),
+    )
+
+
+def repair_missing_night_auto_notifications(
+    *, now: datetime | None = None
+) -> int:
+    """
+    One-shot restart recovery for the transactional outbox.
+
+    This is intentionally not a poller: startup calls it once. It only repairs
+    still-future AUTO bookings that are currently linked to their persistent
+    request and were created during a recorded night round.
+    """
+    now = now or datetime.now(TZ)
+    repaired = 0
+
+    with get_conn() as conn:
+        rounds = conn.execute(
+            """
+            SELECT target_date,started_at,finished_at
+            FROM waitlist_rounds
+            WHERE target_date>=?
+            ORDER BY target_date
+            """,
+            (now.date().isoformat(),),
+        ).fetchall()
+
+    for target_date, started_at, finished_at in rounds:
+        if not started_at:
+            continue
+        end_at = _dt(finished_at) if finished_at else now
+        with get_conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT b.id,b.user_id,m.name,b.date,b.hour,b.created_at
+                FROM bookings b
+                JOIN machines m ON m.id=b.machine_id
+                JOIN waitlist_requests wr ON wr.matched_booking_id=b.id
+                LEFT JOIN pending_waitlist_notifications p ON p.booking_id=b.id
+                LEFT JOIN slot_holds h
+                  ON h.user_id=b.user_id
+                 AND h.machine_id=b.machine_id
+                 AND h.date=CAST(b.date AS TEXT)
+                 AND h.hour=b.hour
+                 AND h.status='accepted'
+                WHERE b.date=?
+                  AND m.type='wash'
+                  AND wr.persistent=1
+                  AND wr.mode='auto'
+                  AND p.id IS NULL
+                  AND h.id IS NULL
+                ORDER BY b.id
+                """,
+                (str(target_date),),
+            ).fetchall()
+
+        round_start = _dt(started_at)
+        for booking_id, user_id, machine_name, date_value, hour, created_at in rows:
+            try:
+                created_dt = datetime.fromisoformat(str(created_at))
+                if created_dt.tzinfo is None:
+                    # SQLite strftime() stores booking creation in UTC.
+                    created_dt = created_dt.replace(tzinfo=ZoneInfo("UTC"))
+                created_dt = created_dt.astimezone(TZ)
+            except Exception:
+                continue
+            if created_dt < round_start or created_dt > end_at:
+                continue
+
+            date_iso = (
+                date_value.isoformat()
+                if hasattr(date_value, "isoformat")
+                else str(date_value)
+            )
+            if _slot_start(date_iso, int(hour)) <= now:
+                continue
+            original_send_at = (round_start + timedelta(days=1)).replace(
+                hour=0, minute=0, second=2, microsecond=0
+            )
+            payload = _night_notification_payload(
+                date_iso,
+                int(hour),
+                str(machine_name),
+                now=now,
+                send_at=original_send_at,
+            )
+            with get_conn() as conn:
+                cur = conn.execute(
+                    """
+                    INSERT INTO pending_waitlist_notifications
+                    (user_id,booking_id,text,send_at,sent,created_at)
+                    VALUES (?,?,?,?,0,?)
+                    ON CONFLICT (booking_id) DO NOTHING
+                    """,
+                    (
+                        int(user_id),
+                        int(booking_id),
+                        payload[0],
+                        payload[1],
+                        payload[2],
+                    ),
+                )
+                repaired += 1
+
+    return repaired
+
+
+async def _send_auto_confirmation(req: Request, result, *, night: bool) -> None:
+    text = _auto_confirmation_text(result.date, result.hour, result.machine_name)
     if night:
-        tomorrow = (datetime.now(TZ) + timedelta(days=1)).replace(hour=0, minute=0, second=2, microsecond=0)
+        payload = _night_notification_payload(
+            result.date, result.hour, result.machine_name
+        )
         with get_conn() as conn:
             conn.execute(
                 """
                 INSERT INTO pending_waitlist_notifications
                 (user_id,booking_id,text,send_at,sent,created_at)
                 VALUES (?,?,?,?,0,?)
+                ON CONFLICT (booking_id) DO NOTHING
                 """,
                 (
                     req.user_id,
                     result.booking_id,
-                    text,
-                    tomorrow.isoformat(timespec="seconds"),
-                    datetime.now(TZ).isoformat(timespec="seconds"),
+                    payload[0],
+                    payload[1],
+                    payload[2],
                 ),
             )
+        return
+    if BOT is None:
         return
     try:
         await BOT.send_message(
@@ -1556,12 +1687,26 @@ async def _distribute_date_locked(
             continue
 
         if wants_auto:
+            notice_factory = None
+            if context == "night":
+                notice_factory = lambda result: _night_notification_payload(
+                    result.date, result.hour, result.machine_name
+                )
             try:
-                result = await create_booking_safe(req.user_id, mid, date_iso, hour)
+                result = await create_booking_safe(
+                    req.user_id,
+                    mid,
+                    date_iso,
+                    hour,
+                    pending_waitlist_notification_factory=notice_factory,
+                )
             except BookingError:
                 continue
+            await asyncio.sleep(0)
             await _schedule_booking_features(result)
-            await _send_auto_confirmation(req, result, night=context == "night")
+            await asyncio.sleep(0)
+            if context != "night":
+                await _send_auto_confirmation(req, result, night=False)
             count += 1
         else:
             await _create_hold(
@@ -1636,8 +1781,11 @@ async def process_night_round() -> None:
         )
 
     record_usage_history()
+    await asyncio.sleep(0)
     requests = [r for r in _active_requests(cutoff.isoformat(timespec="seconds")) if r.accepts_date(target)]
+    await asyncio.sleep(0)
     slots = _free_slots(target)
+    await asyncio.sleep(0)
     matches = _match(requests, slots, date_iso=target) if requests else {}
     by_id = {r.id: r for r in requests}
 
@@ -1645,13 +1793,25 @@ async def process_night_round() -> None:
         req = by_id[rid]
         if req.mode == "auto" and _auto_booking_allowed(target, hour):
             try:
-                result = await create_booking_safe(req.user_id, mid, target, hour)
+                result = await create_booking_safe(
+                    req.user_id,
+                    mid,
+                    target,
+                    hour,
+                    pending_waitlist_notification_factory=(
+                        lambda result: _night_notification_payload(
+                            result.date, result.hour, result.machine_name
+                        )
+                    ),
+                )
             except BookingError:
                 continue
+            await asyncio.sleep(0)
             await _schedule_booking_features(result)
-            await _send_auto_confirmation(req, result, night=True)
+            await asyncio.sleep(0)
         else:
             await _reserve_night_hold(req, mid, target, hour, hold_run_at)
+            await asyncio.sleep(0)
 
     with get_conn() as conn:
         conn.execute(
