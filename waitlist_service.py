@@ -1232,33 +1232,58 @@ async def _schedule_booking_features(result) -> None:
     await schedule_reminder(int(tg[0]), result.machine_name, result.date, result.hour, 30)
 
 
-async def _send_auto_confirmation(req: Request, result, *, night: bool) -> None:
-    if BOT is None:
-        return
-    text = (
+def _auto_confirmation_text(date_iso: str, hour: int, machine_name: str) -> str:
+    return (
         "✅ <b>Вы записаны</b>\n\n"
-        f"📅 {pretty_date(result.date)}\n"
-        f"🕐 {result.hour:02d}:00\n"
-        f"🧺 {result.machine_name}\n\n"
+        f"📅 {pretty_date(date_iso)}\n"
+        f"🕐 {int(hour):02d}:00\n"
+        f"🧺 {machine_name}\n\n"
         "Бот нашёл подходящее время через лист ожидания."
     )
+
+
+def _night_notification_payload(
+    date_iso: str,
+    hour: int,
+    machine_name: str,
+    *,
+    now: datetime | None = None,
+) -> tuple[str, str, str]:
+    now = now or datetime.now(TZ)
+    send_at = (now + timedelta(days=1)).replace(
+        hour=0, minute=0, second=2, microsecond=0
+    )
+    return (
+        _auto_confirmation_text(date_iso, int(hour), machine_name),
+        send_at.isoformat(timespec="seconds"),
+        now.isoformat(timespec="seconds"),
+    )
+
+
+async def _send_auto_confirmation(req: Request, result, *, night: bool) -> None:
+    text = _auto_confirmation_text(result.date, result.hour, result.machine_name)
     if night:
-        tomorrow = (datetime.now(TZ) + timedelta(days=1)).replace(hour=0, minute=0, second=2, microsecond=0)
+        payload = _night_notification_payload(
+            result.date, result.hour, result.machine_name
+        )
         with get_conn() as conn:
             conn.execute(
                 """
                 INSERT INTO pending_waitlist_notifications
                 (user_id,booking_id,text,send_at,sent,created_at)
                 VALUES (?,?,?,?,0,?)
+                ON CONFLICT (booking_id) DO NOTHING
                 """,
                 (
                     req.user_id,
                     result.booking_id,
-                    text,
-                    tomorrow.isoformat(timespec="seconds"),
-                    datetime.now(TZ).isoformat(timespec="seconds"),
+                    payload[0],
+                    payload[1],
+                    payload[2],
                 ),
             )
+        return
+    if BOT is None:
         return
     try:
         await BOT.send_message(
