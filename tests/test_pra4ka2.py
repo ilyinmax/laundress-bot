@@ -210,6 +210,52 @@ class Pra4ka2Tests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(int(count), 2)
 
+    def test_declined_or_expired_hour_is_not_reoffered_same_date(self):
+        import waitlist_service as wl
+
+        m1 = self.mid("Стиральная №1")
+        m3 = self.mid("Стиральная №3")
+        rid = wl.save_request(1001, [(7, 12)], [], True, "notify")
+        req = next(r for r in wl._active_requests() if r.id == rid)
+
+        matches = wl._match(
+            [req],
+            [(m1, 7), (m3, 7), (m1, 8)],
+            date_iso=(datetime.now(TZ).date() + timedelta(days=1)).isoformat(),
+            blocked_hours={rid: {7}},
+        )
+        self.assertEqual(matches[rid], (m1, 8))
+
+    def test_editing_subscription_clears_old_offer_rejections(self):
+        import waitlist_service as wl
+
+        rid = wl.save_request(1001, [(7, 12)], [], True, "notify")
+        with database.get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO waitlist_offer_history
+                (request_id,machine_id,date,hour,result,created_at)
+                VALUES (?,?,?,?,?,?)
+                """,
+                (
+                    rid,
+                    self.mid("Стиральная №1"),
+                    (datetime.now(TZ).date() + timedelta(days=1)).isoformat(),
+                    7,
+                    "expired",
+                    datetime.now(TZ).isoformat(timespec="seconds"),
+                ),
+            )
+
+        same = wl.save_request(1001, [(8, 12)], [], True, "notify")
+        self.assertEqual(same, rid)
+        with database.get_conn() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM waitlist_offer_history WHERE request_id=?",
+                (rid,),
+            ).fetchone()[0]
+        self.assertEqual(int(count), 0)
+
     def test_atomic_booking_reassignment_keeps_slot_occupied_and_syncs_subscriptions(self):
         import booking_service as bs
         import waitlist_service as wl
