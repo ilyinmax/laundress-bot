@@ -889,6 +889,10 @@ def save_request(
             conn.execute("DELETE FROM waitlist_machines WHERE request_id=?", (request_id,))
             conn.execute("DELETE FROM waitlist_weekdays WHERE request_id=?", (request_id,))
             conn.execute("DELETE FROM waitlist_schedule WHERE request_id=?", (request_id,))
+            # Editing the subscription is an explicit change of intent, so old
+            # skipped/expired offers should not permanently suppress the new
+            # preferences.
+            conn.execute("DELETE FROM waitlist_offer_history WHERE request_id=?", (request_id,))
         else:
             if controlling_booking:
                 booking_id, booking_date, booking_hour, booking_end = controlling_booking
@@ -1161,14 +1165,18 @@ def _match(
     date_iso: str | None = None,
     *,
     now: datetime | None = None,
+    blocked_hours: dict[int, set[int]] | None = None,
 ) -> dict[int, tuple[int, int]]:
     now = now or datetime.now(TZ)
+    blocked_hours = blocked_hours or {}
     allowed: dict[int, list[tuple[int, int]]] = {}
     for req in requests:
         opts = [
             slot
             for slot in slots
-            if req.accepts_machine(slot[0]) and req.accepts_hour(slot[1], date_iso)
+            if req.accepts_machine(slot[0])
+            and req.accepts_hour(slot[1], date_iso)
+            and int(slot[1]) not in blocked_hours.get(req.id, set())
         ]
         if opts:
             allowed[req.id] = opts
@@ -1678,7 +1686,20 @@ async def _distribute_date_locked(
             """,
             (str(date_iso), recent_cutoff),
         ).fetchall()
+        rejected_rows = conn.execute(
+            """
+            SELECT DISTINCT request_id,hour
+            FROM waitlist_offer_history
+            WHERE date=? AND result IN ('declined','expired','cancelled_booking')
+            """,
+            (str(date_iso),),
+        ).fetchall()
     recent_requests = {int(r[0]) for r in recent_rows if r[0] is not None}
+    blocked_hours: dict[int, set[int]] = {}
+    for request_id, rejected_hour in rejected_rows:
+        if request_id is None:
+            continue
+        blocked_hours.setdefault(int(request_id), set()).add(int(rejected_hour))
     requests = [
         r for r in requests
         if r.id not in recent_requests and r.accepts_date(date_iso)
@@ -1691,7 +1712,11 @@ async def _distribute_date_locked(
     ]
     if not slots:
         return 0
-    matches = _match(requests, slots, date_iso=date_iso) if requests else {}
+    matches = (
+        _match(requests, slots, date_iso=date_iso, blocked_hours=blocked_hours)
+        if requests
+        else {}
+    )
     by_id = {r.id: r for r in requests}
     count = 0
     for rid, (mid, hour) in matches.items():
@@ -2261,11 +2286,11 @@ async def offer_earlier_for_date(date_iso: str) -> int:
             rejected = conn.execute(
                 """
                 SELECT 1 FROM waitlist_offer_history
-                WHERE request_id=? AND machine_id=? AND date=? AND hour=?
-                  AND result IN ('declined','expired')
+                WHERE request_id=? AND date=? AND hour=?
+                  AND result IN ('declined','expired','cancelled_booking')
                 LIMIT 1
                 """,
-                (req.id, mid, str(date_iso), int(hour)),
+                (req.id, str(date_iso), int(hour)),
             ).fetchone()
         if rejected:
             continue
