@@ -112,6 +112,17 @@ def _booking_end(date_iso: str, hour: int) -> datetime:
     return _slot_start(date_iso, hour) + timedelta(hours=1)
 
 
+def _is_strictly_earlier_slot(
+    date_iso: str,
+    hour: int,
+    current_date_iso: str,
+    current_hour: int,
+) -> bool:
+    return _slot_start(date_iso, int(hour)) < _slot_start(
+        current_date_iso, int(current_hour)
+    )
+
+
 def _hold_duration_minutes(
     date_iso: str, hour: int, now: datetime | None = None
 ) -> int | None:
@@ -2188,13 +2199,13 @@ async def offer_earlier_for_date(date_iso: str) -> int:
         rows = conn.execute(
             """
             SELECT wr.id,wr.user_id,u.tg_id,wr.any_machine,wr.priority_since,
-                   wr.matched_booking_id,b.date
+                   wr.matched_booking_id,b.date,b.hour
             FROM waitlist_requests wr
             JOIN users u ON u.id=wr.user_id
             JOIN bookings b ON b.id=wr.matched_booking_id
             LEFT JOIN notification_settings ns ON ns.user_id=wr.user_id
             WHERE wr.status='matched'
-              AND b.date>?
+              AND b.date>=?
               AND COALESCE(ns.earlier_offer_enabled,1)=1
             ORDER BY wr.priority_since
             """,
@@ -2240,7 +2251,7 @@ async def offer_earlier_for_date(date_iso: str) -> int:
     recent_requests = {int(r[0]) for r in recent_rows if r[0] is not None}
 
     candidates = []
-    for rid, uid, tg, any_machine, priority_since, booking_id, current_date in rows:
+    for rid, uid, tg, any_machine, priority_since, booking_id, current_date, current_hour in rows:
         if int(tg) <= 0 or is_banned(int(tg)):
             continue
         if int(rid) in recent_requests:
@@ -2263,6 +2274,12 @@ async def offer_earlier_for_date(date_iso: str) -> int:
             continue
         candidates.append(candidate)
         candidates[-1].current_booking_id = int(booking_id)
+        candidates[-1].current_booking_date = (
+            current_date.isoformat()
+            if hasattr(current_date, "isoformat")
+            else str(current_date)
+        )
+        candidates[-1].current_booking_hour = int(current_hour)
 
     penalties = usage_penalties_for_users([c.user_id for c in candidates])
     for c in candidates:
@@ -2277,6 +2294,12 @@ async def offer_earlier_for_date(date_iso: str) -> int:
             if c.id not in used_users
             and c.accepts_machine(mid)
             and c.accepts_hour(hour, date_iso)
+            and _is_strictly_earlier_slot(
+                date_iso,
+                int(hour),
+                c.current_booking_date,
+                c.current_booking_hour,
+            )
         ]
         if not compatible:
             continue
