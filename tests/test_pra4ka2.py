@@ -256,6 +256,21 @@ class Pra4ka2Tests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(int(count), 0)
 
+    def test_same_day_earlier_slot_is_considered_better(self):
+        import waitlist_service as wl
+
+        date_iso = (datetime.now(TZ).date() + timedelta(days=1)).isoformat()
+        self.assertTrue(wl._is_strictly_earlier_slot(date_iso, 18, date_iso, 21))
+        self.assertFalse(wl._is_strictly_earlier_slot(date_iso, 21, date_iso, 21))
+        self.assertFalse(wl._is_strictly_earlier_slot(date_iso, 22, date_iso, 21))
+
+    def test_previous_day_is_still_considered_earlier(self):
+        import waitlist_service as wl
+
+        current = (datetime.now(TZ).date() + timedelta(days=2)).isoformat()
+        earlier = (datetime.now(TZ).date() + timedelta(days=1)).isoformat()
+        self.assertTrue(wl._is_strictly_earlier_slot(earlier, 22, current, 7))
+
     def test_atomic_booking_reassignment_keeps_slot_occupied_and_syncs_subscriptions(self):
         import booking_service as bs
         import waitlist_service as wl
