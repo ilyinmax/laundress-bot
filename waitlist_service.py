@@ -38,6 +38,8 @@ HOLD_MINUTES = 5
 URGENT_HOLD_MINUTES = 2
 MIN_HOLD_LEAD_MINUTES = 5
 MIN_AUTO_LEAD_MINUTES = 30
+OVERNIGHT_SAME_DAY_START_HOUR = 23
+OVERNIGHT_SAME_DAY_END_HOUR = 8
 WAITLIST_ENABLED = os.getenv("WAITLIST_ENABLED", "true").lower() not in {"0", "false", "off", "no"}
 
 
@@ -419,6 +421,50 @@ def _cancel_hold_expiry(hold_id: int) -> None:
     _remove_job(f"waitlist_hold_{int(hold_id)}")
 
 
+def _overnight_defer_run_at(now: datetime | None = None) -> datetime | None:
+    """Return the next safe morning redistribution time for an overnight event."""
+    now = now or datetime.now(TZ)
+    if now.hour >= OVERNIGHT_SAME_DAY_START_HOUR:
+        return (now + timedelta(days=1)).replace(
+            hour=OVERNIGHT_SAME_DAY_END_HOUR,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+    if now.hour < OVERNIGHT_SAME_DAY_END_HOUR:
+        return now.replace(
+            hour=OVERNIGHT_SAME_DAY_END_HOUR,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+    return None
+
+
+def _deferred_same_day_job_id(date_iso: str) -> str:
+    return f"waitlist_deferred_same_day_{str(date_iso)}"
+
+
+async def _run_deferred_same_day_distribution(date_iso: str) -> None:
+    await distribute_date(str(date_iso), context="day")
+
+
+def _schedule_deferred_same_day_distribution(date_iso: str, run_at: datetime) -> None:
+    from apscheduler.triggers.date import DateTrigger
+    from scheduler import scheduler
+    now = datetime.now(TZ)
+    if run_at <= now:
+        run_at = now + timedelta(seconds=1)
+    scheduler.add_job(
+        _run_deferred_same_day_distribution,
+        trigger=DateTrigger(run_date=run_at),
+        id=_deferred_same_day_job_id(str(date_iso)),
+        args=[str(date_iso)],
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
+
+
 def _night_hold_job_id(date_iso: str) -> str:
     return f"waitlist_night_holds_{str(date_iso)}"
 
@@ -646,6 +692,29 @@ async def rebuild_waitlist_jobs() -> None:
             target_date,
             max(planned, now + timedelta(seconds=1)),
         )
+
+    with get_conn() as conn:
+        deferred_rows = conn.execute(
+            """
+            SELECT target_date,run_at
+            FROM deferred_waitlist_distributions
+            ORDER BY target_date
+            """
+        ).fetchall()
+
+    today_iso = now.date().isoformat()
+    for target_date, run_at in deferred_rows:
+        target_date = datetime.fromisoformat(str(target_date)).date().isoformat()
+        if target_date < today_iso:
+            with get_conn() as conn:
+                conn.execute(
+                    "DELETE FROM deferred_waitlist_distributions WHERE target_date=?",
+                    (target_date,),
+                )
+            continue
+        planned = _dt(run_at)
+        if planned > now:
+            _schedule_deferred_same_day_distribution(target_date, planned)
 
     repair_missing_night_auto_notifications(now=now)
     schedule_next_pending_notification()
@@ -1571,6 +1640,7 @@ async def _create_hold(
     context: str,
     *,
     urgent_auto: bool = False,
+    overnight_auto: bool = False,
 ) -> None:
     if BOT is None:
         return
@@ -1631,7 +1701,17 @@ async def _create_hold(
         InlineKeyboardButton(text="✅ Записаться", callback_data=f"wl_accept_{hold_id}"),
         InlineKeyboardButton(text="❌ Пропустить", callback_data=f"wl_decline_{hold_id}"),
     ]])
-    if urgent_auto:
+    if overnight_auto:
+        text = (
+            "🌙 <b>Ночью освободилось место</b>\n\n"
+            f"📅 {pretty_date(date_iso)}\n"
+            f"🕐 {hour:02d}:00\n"
+            f"🧺 {machine[0]}\n\n"
+            "Бот не стал записывать вас автоматически, пока вы спали. "
+            "Если время подходит, подтвердите запись.\n"
+            f"{hold_text}"
+        )
+    elif urgent_auto:
         text = (
             "⚡ <b>Освободилось место прямо сейчас</b>\n\n"
             f"🕐 {hour:02d}:00, {machine[0]}\n\n"
@@ -1666,8 +1746,65 @@ async def distribute_date(
 ) -> int:
     if not WAITLIST_ENABLED:
         return 0
+
+    date_iso = datetime.fromisoformat(str(date_iso)).date().isoformat()
+    now = datetime.now(TZ)
+    force_confirmation = context == "overnight_day"
+    consume_deferred = False
+
+    if context in {"day", "freed_slot"}:
+        with get_conn() as conn:
+            deferred = conn.execute(
+                "SELECT run_at FROM deferred_waitlist_distributions WHERE target_date=?",
+                (date_iso,),
+            ).fetchone()
+
+        if deferred:
+            run_at = _dt(deferred[0])
+            if run_at > now:
+                _schedule_deferred_same_day_distribution(date_iso, run_at)
+                return 0
+            context = "overnight_day"
+            force_confirmation = True
+            consume_deferred = True
+        elif context == "freed_slot":
+            run_at = _overnight_defer_run_at(now)
+            if run_at is not None:
+                with get_conn() as conn:
+                    conn.execute(
+                        """
+                        INSERT INTO deferred_waitlist_distributions
+                        (target_date,run_at,created_at)
+                        VALUES (?,?,?)
+                        ON CONFLICT(target_date) DO UPDATE SET run_at=excluded.run_at
+                        """,
+                        (
+                            date_iso,
+                            run_at.isoformat(timespec="seconds"),
+                            now.isoformat(timespec="seconds"),
+                        ),
+                    )
+                _schedule_deferred_same_day_distribution(date_iso, run_at)
+                return 0
+            context = "day"
+
     async with _DISTRIBUTION_LOCK:
-        return await _distribute_date_locked(date_iso, context=context, phase=phase)
+        matched = await _distribute_date_locked(
+            date_iso,
+            context=context,
+            phase=phase,
+            force_confirmation=force_confirmation,
+        )
+
+    if consume_deferred:
+        with get_conn() as conn:
+            conn.execute(
+                "DELETE FROM deferred_waitlist_distributions WHERE target_date=?",
+                (date_iso,),
+            )
+        _remove_job(_deferred_same_day_job_id(date_iso))
+
+    return matched
 
 
 async def _distribute_date_locked(
@@ -1675,6 +1812,7 @@ async def _distribute_date_locked(
     *,
     context: str = "day",
     phase: str = "all",
+    force_confirmation: bool = False,
 ) -> int:
     # Keep 30-day fairness data current only when matching is actually needed.
     record_usage_history()
@@ -1733,7 +1871,11 @@ async def _distribute_date_locked(
     for rid, (mid, hour) in matches.items():
         req = by_id[rid]
 
-        wants_auto = req.mode == "auto" and _auto_booking_allowed(date_iso, hour)
+        wants_auto = (
+            req.mode == "auto"
+            and _auto_booking_allowed(date_iso, hour)
+            and not force_confirmation
+        )
         if phase == "auto" and not wants_auto:
             continue
         if phase == "holds" and wants_auto:
@@ -1768,11 +1910,12 @@ async def _distribute_date_locked(
                 date_iso,
                 hour,
                 context,
-                urgent_auto=req.mode == "auto",
+                urgent_auto=req.mode == "auto" and not force_confirmation,
+                overnight_auto=req.mode == "auto" and force_confirmation,
             )
             count += 1
 
-    if context == "day":
+    if context in {"day", "overnight_day"}:
         await offer_earlier_for_date(date_iso)
     return count
 
@@ -1973,6 +2116,8 @@ async def expire_hold(hold_id: int) -> bool:
     if context == "night":
         if now.hour == 23:
             await distribute_date(date_iso, context="night")
+    elif context == "overnight_day":
+        await distribute_date(date_iso, context="overnight_day")
     elif context in {"day", "move"}:
         await distribute_date(date_iso, context="day")
 
@@ -2115,6 +2260,8 @@ async def decline_hold(hold_id: int, tg_id: int) -> bool:
     _cancel_hold_expiry(int(hold_id))
     if str(row[9]) == "night" and datetime.now(TZ).hour == 23:
         await distribute_date(str(row[6]), context="night")
+    elif str(row[9]) == "overnight_day":
+        await distribute_date(str(row[6]), context="overnight_day")
     elif str(row[9]) in {"day", "move"}:
         await distribute_date(str(row[6]), context="day")
     return True
@@ -2169,7 +2316,7 @@ async def accept_hold(hold_id: int, tg_id: int):
             int(row[1]), int(new.booking_id), str(new.date), int(new.hour)
         )
         _cancel_hold_expiry(int(hold_id))
-        await distribute_date(old.date, context="day")
+        await distribute_date(old.date, context="freed_slot")
         return new
 
     try:

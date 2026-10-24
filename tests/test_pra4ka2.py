@@ -66,6 +66,105 @@ class Pra4ka2Tests(unittest.TestCase):
         self.assertIn("2 минуты", wl._hold_deadline_text(now + timedelta(minutes=2), 2))
 
 
+    def test_overnight_defer_time_policy(self):
+        import waitlist_service as wl
+
+        early = datetime(2026, 10, 24, 2, 35, tzinfo=TZ)
+        self.assertEqual(
+            wl._overnight_defer_run_at(early),
+            datetime(2026, 10, 24, 8, 0, tzinfo=TZ),
+        )
+        late = datetime(2026, 10, 24, 23, 35, tzinfo=TZ)
+        self.assertEqual(
+            wl._overnight_defer_run_at(late),
+            datetime(2026, 10, 25, 8, 0, tzinfo=TZ),
+        )
+        daytime = datetime(2026, 10, 24, 8, 0, tzinfo=TZ)
+        self.assertIsNone(wl._overnight_defer_run_at(daytime))
+
+    def test_freed_slot_can_be_deferred_without_creating_booking(self):
+        import waitlist_service as wl
+        from unittest.mock import patch
+
+        wl.save_request(
+            1001,
+            [],
+            [],
+            True,
+            "auto",
+            schedule={day: [(7, 23)] for day in range(7)},
+        )
+        target = (datetime.now(TZ).date() + timedelta(days=1)).isoformat()
+        run_at = datetime.now(TZ) + timedelta(hours=1)
+
+        with patch.object(wl, "_overnight_defer_run_at", return_value=run_at), \
+             patch.object(wl, "_schedule_deferred_same_day_distribution") as schedule:
+            matched = asyncio.run(
+                wl.distribute_date(target, context="freed_slot")
+            )
+
+        self.assertEqual(matched, 0)
+        schedule.assert_called_once()
+        with database.get_conn() as conn:
+            deferred = conn.execute(
+                "SELECT run_at FROM deferred_waitlist_distributions WHERE target_date=?",
+                (target,),
+            ).fetchone()
+            bookings = conn.execute(
+                "SELECT COUNT(*) FROM bookings WHERE user_id=?",
+                (self.uid(1001),),
+            ).fetchone()[0]
+        self.assertIsNotNone(deferred)
+        self.assertEqual(int(bookings), 0)
+
+    def test_due_overnight_slot_requires_confirmation_even_for_auto(self):
+        import waitlist_service as wl
+        from unittest.mock import AsyncMock, patch
+
+        wl.save_request(
+            1001,
+            [],
+            [],
+            True,
+            "auto",
+            schedule={day: [(7, 23)] for day in range(7)},
+        )
+        target = (datetime.now(TZ).date() + timedelta(days=1)).isoformat()
+        past = datetime.now(TZ) - timedelta(minutes=1)
+        with database.get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO deferred_waitlist_distributions
+                (target_date,run_at,created_at)
+                VALUES (?,?,?)
+                """,
+                (
+                    target,
+                    past.isoformat(timespec="seconds"),
+                    past.isoformat(timespec="seconds"),
+                ),
+            )
+
+        fake_hold = AsyncMock(return_value=True)
+        fake_booking = AsyncMock()
+        with patch.object(wl, "_create_hold", new=fake_hold), \
+             patch.object(wl, "create_booking_safe", new=fake_booking):
+            matched = asyncio.run(wl.distribute_date(target, context="day"))
+
+        self.assertGreaterEqual(matched, 1)
+        fake_booking.assert_not_called()
+        self.assertTrue(fake_hold.called)
+        kwargs = fake_hold.call_args.kwargs
+        self.assertTrue(kwargs["overnight_auto"])
+        self.assertFalse(kwargs["urgent_auto"])
+        with database.get_conn() as conn:
+            deferred = conn.execute(
+                "SELECT 1 FROM deferred_waitlist_distributions WHERE target_date=?",
+                (target,),
+            ).fetchone()
+        self.assertIsNone(deferred)
+
+
     def test_edit_machine_preferences_preserves_priority(self):
         import waitlist_service as wl
 

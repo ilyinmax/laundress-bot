@@ -438,7 +438,7 @@ async def cancel_confirm(msg: types.Message, state: FSMContext):
     else:
         await msg.answer("✅ Запись отменена.", reply_markup=main_kb(msg.from_user.id))
     from waitlist_service import distribute_date
-    await distribute_date(old.date, context="day")
+    await distribute_date(old.date, context="freed_slot")
 
 
 def _schedule_from_rows(rows) -> dict[int, list[tuple[int, int]]]:
