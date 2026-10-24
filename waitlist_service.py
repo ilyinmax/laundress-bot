@@ -693,6 +693,29 @@ async def rebuild_waitlist_jobs() -> None:
             max(planned, now + timedelta(seconds=1)),
         )
 
+    with get_conn() as conn:
+        deferred_rows = conn.execute(
+            """
+            SELECT target_date,run_at
+            FROM deferred_waitlist_distributions
+            ORDER BY target_date
+            """
+        ).fetchall()
+
+    today_iso = now.date().isoformat()
+    for target_date, run_at in deferred_rows:
+        target_date = datetime.fromisoformat(str(target_date)).date().isoformat()
+        if target_date < today_iso:
+            with get_conn() as conn:
+                conn.execute(
+                    "DELETE FROM deferred_waitlist_distributions WHERE target_date=?",
+                    (target_date,),
+                )
+            continue
+        planned = _dt(run_at)
+        if planned > now:
+            _schedule_deferred_same_day_distribution(target_date, planned)
+
     repair_missing_night_auto_notifications(now=now)
     schedule_next_pending_notification()
     await check_active_waitlist()
