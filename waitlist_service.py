@@ -1811,6 +1811,7 @@ async def _distribute_date_locked(
     *,
     context: str = "day",
     phase: str = "all",
+    force_confirmation: bool = False,
 ) -> int:
     # Keep 30-day fairness data current only when matching is actually needed.
     record_usage_history()
@@ -1869,7 +1870,11 @@ async def _distribute_date_locked(
     for rid, (mid, hour) in matches.items():
         req = by_id[rid]
 
-        wants_auto = req.mode == "auto" and _auto_booking_allowed(date_iso, hour)
+        wants_auto = (
+            req.mode == "auto"
+            and _auto_booking_allowed(date_iso, hour)
+            and not force_confirmation
+        )
         if phase == "auto" and not wants_auto:
             continue
         if phase == "holds" and wants_auto:
@@ -1904,11 +1909,12 @@ async def _distribute_date_locked(
                 date_iso,
                 hour,
                 context,
-                urgent_auto=req.mode == "auto",
+                urgent_auto=req.mode == "auto" and not force_confirmation,
+                overnight_auto=req.mode == "auto" and force_confirmation,
             )
             count += 1
 
-    if context == "day":
+    if context in {"day", "overnight_day"}:
         await offer_earlier_for_date(date_iso)
     return count
 
