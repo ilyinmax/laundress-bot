@@ -328,7 +328,7 @@ async def _admin_delete_booking(
 
     if redistribute:
         from waitlist_service import distribute_date
-        await distribute_date(old.date, context="day")
+        await distribute_date(old.date, context="freed_slot")
 
     await callback.answer(
         "Удалено и передано очереди."
