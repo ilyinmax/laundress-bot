@@ -38,6 +38,8 @@ HOLD_MINUTES = 5
 URGENT_HOLD_MINUTES = 2
 MIN_HOLD_LEAD_MINUTES = 5
 MIN_AUTO_LEAD_MINUTES = 30
+OVERNIGHT_SAME_DAY_START_HOUR = 23
+OVERNIGHT_SAME_DAY_END_HOUR = 8
 WAITLIST_ENABLED = os.getenv("WAITLIST_ENABLED", "true").lower() not in {"0", "false", "off", "no"}
 
 
@@ -417,6 +419,39 @@ def _schedule_hold_expiry(hold_id: int, expires_at) -> None:
 
 def _cancel_hold_expiry(hold_id: int) -> None:
     _remove_job(f"waitlist_hold_{int(hold_id)}")
+
+
+def _is_overnight_same_day(date_iso: str, now: datetime | None = None) -> bool:
+    now = now or datetime.now(TZ)
+    target = datetime.fromisoformat(str(date_iso)).date()
+    return target == now.date() and (
+        now.hour >= OVERNIGHT_SAME_DAY_START_HOUR
+        or now.hour < OVERNIGHT_SAME_DAY_END_HOUR
+    )
+
+
+def _deferred_same_day_job_id(date_iso: str) -> str:
+    return f"waitlist_deferred_same_day_{str(date_iso)}"
+
+
+async def _run_deferred_same_day_distribution(date_iso: str) -> None:
+    await distribute_date(str(date_iso), context="day")
+
+
+def _schedule_deferred_same_day_distribution(date_iso: str, run_at: datetime) -> None:
+    from apscheduler.triggers.date import DateTrigger
+    from scheduler import scheduler
+    now = datetime.now(TZ)
+    if run_at <= now:
+        run_at = now + timedelta(seconds=1)
+    scheduler.add_job(
+        _run_deferred_same_day_distribution,
+        trigger=DateTrigger(run_date=run_at),
+        id=_deferred_same_day_job_id(str(date_iso)),
+        args=[str(date_iso)],
+        replace_existing=True,
+        misfire_grace_time=3600,
+    )
 
 
 def _night_hold_job_id(date_iso: str) -> str:
