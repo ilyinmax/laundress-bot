@@ -39,7 +39,7 @@ URGENT_HOLD_MINUTES = 2
 MIN_HOLD_LEAD_MINUTES = 5
 MIN_AUTO_LEAD_MINUTES = 30
 OVERNIGHT_SAME_DAY_START_HOUR = 23
-OVERNIGHT_SAME_DAY_END_HOUR = 8
+OVERNIGHT_SAME_DAY_END_HOUR = 9
 WAITLIST_ENABLED = os.getenv("WAITLIST_ENABLED", "true").lower() not in {"0", "false", "off", "no"}
 
 
@@ -1749,7 +1749,7 @@ async def distribute_date(
 
     date_iso = datetime.fromisoformat(str(date_iso)).date().isoformat()
     now = datetime.now(TZ)
-    force_confirmation = context == "overnight_day"
+    force_confirmation = context in {"overnight_day_first", "overnight_day"}
     consume_deferred = False
 
     if context in {"day", "freed_slot"}:
@@ -1764,7 +1764,7 @@ async def distribute_date(
             if run_at > now:
                 _schedule_deferred_same_day_distribution(date_iso, run_at)
                 return 0
-            context = "overnight_day"
+            context = "overnight_day_first"
             force_confirmation = True
             consume_deferred = True
         elif context == "freed_slot":
@@ -1911,11 +1911,14 @@ async def _distribute_date_locked(
                 hour,
                 context,
                 urgent_auto=req.mode == "auto" and not force_confirmation,
-                overnight_auto=req.mode == "auto" and force_confirmation,
+                overnight_auto=(
+                    req.mode == "auto"
+                    and context == "overnight_day_first"
+                ),
             )
             count += 1
 
-    if context in {"day", "overnight_day"}:
+    if context in {"day", "overnight_day_first", "overnight_day"}:
         await offer_earlier_for_date(date_iso)
     return count
 
@@ -2116,6 +2119,8 @@ async def expire_hold(hold_id: int) -> bool:
     if context == "night":
         if now.hour == 23:
             await distribute_date(date_iso, context="night")
+    elif context == "overnight_day_first":
+        await distribute_date(date_iso, context="overnight_day")
     elif context == "overnight_day":
         await distribute_date(date_iso, context="overnight_day")
     elif context in {"day", "move"}:
@@ -2260,6 +2265,8 @@ async def decline_hold(hold_id: int, tg_id: int) -> bool:
     _cancel_hold_expiry(int(hold_id))
     if str(row[9]) == "night" and datetime.now(TZ).hour == 23:
         await distribute_date(str(row[6]), context="night")
+    elif str(row[9]) == "overnight_day_first":
+        await distribute_date(str(row[6]), context="overnight_day")
     elif str(row[9]) == "overnight_day":
         await distribute_date(str(row[6]), context="overnight_day")
     elif str(row[9]) in {"day", "move"}:
