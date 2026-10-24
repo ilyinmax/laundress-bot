@@ -1640,6 +1640,7 @@ async def _create_hold(
     context: str,
     *,
     urgent_auto: bool = False,
+    overnight_auto: bool = False,
 ) -> None:
     if BOT is None:
         return
@@ -1700,7 +1701,17 @@ async def _create_hold(
         InlineKeyboardButton(text="✅ Записаться", callback_data=f"wl_accept_{hold_id}"),
         InlineKeyboardButton(text="❌ Пропустить", callback_data=f"wl_decline_{hold_id}"),
     ]])
-    if urgent_auto:
+    if overnight_auto:
+        text = (
+            "🌙 <b>Ночью освободилось место</b>\n\n"
+            f"📅 {pretty_date(date_iso)}\n"
+            f"🕐 {hour:02d}:00\n"
+            f"🧺 {machine[0]}\n\n"
+            "Бот не стал записывать вас автоматически, пока вы спали. "
+            "Если время подходит, подтвердите запись.\n"
+            f"{hold_text}"
+        )
+    elif urgent_auto:
         text = (
             "⚡ <b>Освободилось место прямо сейчас</b>\n\n"
             f"🕐 {hour:02d}:00, {machine[0]}\n\n"
