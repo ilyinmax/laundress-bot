@@ -82,6 +82,27 @@ class Pra4ka2Tests(unittest.TestCase):
         daytime = datetime(2026, 10, 24, 9, 0, tzinfo=TZ)
         self.assertIsNone(wl._overnight_defer_run_at(daytime))
 
+    def test_overnight_defer_applies_only_to_near_term_slots(self):
+        import waitlist_service as wl
+
+        after_midnight = datetime(2026, 10, 25, 1, 30, tzinfo=TZ)
+        self.assertEqual(
+            wl._overnight_defer_for_slot("2026-10-25", after_midnight),
+            datetime(2026, 10, 25, 9, 0, tzinfo=TZ),
+        )
+        self.assertIsNone(
+            wl._overnight_defer_for_slot("2026-10-27", after_midnight)
+        )
+
+        before_midnight = datetime(2026, 10, 24, 23, 30, tzinfo=TZ)
+        self.assertEqual(
+            wl._overnight_defer_for_slot("2026-10-25", before_midnight),
+            datetime(2026, 10, 25, 9, 0, tzinfo=TZ),
+        )
+        self.assertIsNone(
+            wl._overnight_defer_for_slot("2026-10-26", before_midnight)
+        )
+
     def test_freed_slot_can_be_deferred_without_creating_booking(self):
         import waitlist_service as wl
         from unittest.mock import patch
