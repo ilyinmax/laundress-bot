@@ -421,13 +421,24 @@ def _cancel_hold_expiry(hold_id: int) -> None:
     _remove_job(f"waitlist_hold_{int(hold_id)}")
 
 
-def _is_overnight_same_day(date_iso: str, now: datetime | None = None) -> bool:
+def _overnight_defer_run_at(now: datetime | None = None) -> datetime | None:
+    """Return the next safe morning redistribution time for an overnight event."""
     now = now or datetime.now(TZ)
-    target = datetime.fromisoformat(str(date_iso)).date()
-    return target == now.date() and (
-        now.hour >= OVERNIGHT_SAME_DAY_START_HOUR
-        or now.hour < OVERNIGHT_SAME_DAY_END_HOUR
-    )
+    if now.hour >= OVERNIGHT_SAME_DAY_START_HOUR:
+        return (now + timedelta(days=1)).replace(
+            hour=OVERNIGHT_SAME_DAY_END_HOUR,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+    if now.hour < OVERNIGHT_SAME_DAY_END_HOUR:
+        return now.replace(
+            hour=OVERNIGHT_SAME_DAY_END_HOUR,
+            minute=0,
+            second=0,
+            microsecond=0,
+        )
+    return None
 
 
 def _deferred_same_day_job_id(date_iso: str) -> str:
