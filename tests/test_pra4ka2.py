@@ -72,14 +72,14 @@ class Pra4ka2Tests(unittest.TestCase):
         early = datetime(2026, 10, 24, 2, 35, tzinfo=TZ)
         self.assertEqual(
             wl._overnight_defer_run_at(early),
-            datetime(2026, 10, 24, 8, 0, tzinfo=TZ),
+            datetime(2026, 10, 24, 9, 0, tzinfo=TZ),
         )
         late = datetime(2026, 10, 24, 23, 35, tzinfo=TZ)
         self.assertEqual(
             wl._overnight_defer_run_at(late),
-            datetime(2026, 10, 25, 8, 0, tzinfo=TZ),
+            datetime(2026, 10, 25, 9, 0, tzinfo=TZ),
         )
-        daytime = datetime(2026, 10, 24, 8, 0, tzinfo=TZ)
+        daytime = datetime(2026, 10, 24, 9, 0, tzinfo=TZ)
         self.assertIsNone(wl._overnight_defer_run_at(daytime))
 
     def test_freed_slot_can_be_deferred_without_creating_booking(self):
@@ -163,6 +163,45 @@ class Pra4ka2Tests(unittest.TestCase):
                 (target,),
             ).fetchone()
         self.assertIsNone(deferred)
+
+
+    def test_only_first_morning_auto_offer_uses_overnight_copy(self):
+        import waitlist_service as wl
+        from unittest.mock import AsyncMock, patch
+
+        wl.save_request(
+            1001,
+            [],
+            [],
+            True,
+            "auto",
+            schedule={day: [(7, 23)] for day in range(7)},
+        )
+        target = (datetime.now(TZ).date() + timedelta(days=1)).isoformat()
+
+        first_hold = AsyncMock(return_value=True)
+        with patch.object(wl, "_create_hold", new=first_hold):
+            asyncio.run(
+                wl._distribute_date_locked(
+                    target,
+                    context="overnight_day_first",
+                    force_confirmation=True,
+                )
+            )
+        self.assertTrue(first_hold.called)
+        self.assertTrue(first_hold.call_args.kwargs["overnight_auto"])
+
+        next_hold = AsyncMock(return_value=True)
+        with patch.object(wl, "_create_hold", new=next_hold):
+            asyncio.run(
+                wl._distribute_date_locked(
+                    target,
+                    context="overnight_day",
+                    force_confirmation=True,
+                )
+            )
+        self.assertTrue(next_hold.called)
+        self.assertFalse(next_hold.call_args.kwargs["overnight_auto"])
 
 
     def test_edit_machine_preferences_preserves_priority(self):
