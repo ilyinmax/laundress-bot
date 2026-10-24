@@ -2316,7 +2316,7 @@ async def accept_hold(hold_id: int, tg_id: int):
             int(row[1]), int(new.booking_id), str(new.date), int(new.hour)
         )
         _cancel_hold_expiry(int(hold_id))
-        await distribute_date(old.date, context="day")
+        await distribute_date(old.date, context="freed_slot")
         return new
 
     try:
