@@ -2115,6 +2115,8 @@ async def expire_hold(hold_id: int) -> bool:
     if context == "night":
         if now.hour == 23:
             await distribute_date(date_iso, context="night")
+    elif context == "overnight_day":
+        await distribute_date(date_iso, context="overnight_day")
     elif context in {"day", "move"}:
         await distribute_date(date_iso, context="day")
 
@@ -2257,6 +2259,8 @@ async def decline_hold(hold_id: int, tg_id: int) -> bool:
     _cancel_hold_expiry(int(hold_id))
     if str(row[9]) == "night" and datetime.now(TZ).hour == 23:
         await distribute_date(str(row[6]), context="night")
+    elif str(row[9]) == "overnight_day":
+        await distribute_date(str(row[6]), context="overnight_day")
     elif str(row[9]) in {"day", "move"}:
         await distribute_date(str(row[6]), context="day")
     return True
