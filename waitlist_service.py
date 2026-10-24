@@ -441,6 +441,26 @@ def _overnight_defer_run_at(now: datetime | None = None) -> datetime | None:
     return None
 
 
+def _overnight_defer_for_slot(
+    date_iso: str,
+    now: datetime | None = None,
+) -> datetime | None:
+    """
+    Defer only slots that occur no later than the nearest safe morning.
+
+    Examples:
+    - 02:00 -> same-day slots wait until 09:00;
+    - 23:30 -> next-day slots may wait until 09:00;
+    - a slot two days away is redistributed immediately.
+    """
+    now = now or datetime.now(TZ)
+    run_at = _overnight_defer_run_at(now)
+    if run_at is None:
+        return None
+    target = datetime.fromisoformat(str(date_iso)).date()
+    return run_at if target <= run_at.date() else None
+
+
 def _deferred_same_day_job_id(date_iso: str) -> str:
     return f"waitlist_deferred_same_day_{str(date_iso)}"
 
@@ -705,14 +725,18 @@ async def rebuild_waitlist_jobs() -> None:
     today_iso = now.date().isoformat()
     for target_date, run_at in deferred_rows:
         target_date = datetime.fromisoformat(str(target_date)).date().isoformat()
-        if target_date < today_iso:
+        planned = _dt(run_at)
+        stale_or_too_far = (
+            target_date < today_iso
+            or datetime.fromisoformat(target_date).date() > planned.date()
+        )
+        if stale_or_too_far:
             with get_conn() as conn:
                 conn.execute(
                     "DELETE FROM deferred_waitlist_distributions WHERE target_date=?",
                     (target_date,),
                 )
             continue
-        planned = _dt(run_at)
         if planned > now:
             _schedule_deferred_same_day_distribution(target_date, planned)
 
@@ -1761,14 +1785,25 @@ async def distribute_date(
 
         if deferred:
             run_at = _dt(deferred[0])
-            if run_at > now:
+            target_date = datetime.fromisoformat(date_iso).date()
+            if target_date > run_at.date():
+                with get_conn() as conn:
+                    conn.execute(
+                        "DELETE FROM deferred_waitlist_distributions WHERE target_date=?",
+                        (date_iso,),
+                    )
+                _remove_job(_deferred_same_day_job_id(date_iso))
+                deferred = None
+            elif run_at > now:
                 _schedule_deferred_same_day_distribution(date_iso, run_at)
                 return 0
-            context = "overnight_day_first"
-            force_confirmation = True
-            consume_deferred = True
-        elif context == "freed_slot":
-            run_at = _overnight_defer_run_at(now)
+            else:
+                context = "overnight_day_first"
+                force_confirmation = True
+                consume_deferred = True
+
+        if not deferred and context == "freed_slot":
+            run_at = _overnight_defer_for_slot(date_iso, now)
             if run_at is not None:
                 with get_conn() as conn:
                     conn.execute(
