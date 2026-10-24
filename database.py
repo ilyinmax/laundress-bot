@@ -983,6 +983,13 @@ def ensure_pra4ka2_tables():
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_holds_one_active_user ON slot_holds(user_id) WHERE status='active'",
         "CREATE INDEX IF NOT EXISTS idx_usage_user_time ON laundry_usage_history(user_id, occurred_at)",
         "CREATE INDEX IF NOT EXISTS idx_pending_notice ON pending_waitlist_notifications(sent, send_at)",
+        """
+        CREATE TABLE IF NOT EXISTS deferred_waitlist_distributions (
+            target_date TEXT PRIMARY KEY,
+            run_at TEXT NOT NULL,
+            created_at TEXT NOT NULL
+        )
+        """,
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_notice_booking ON pending_waitlist_notifications(booking_id)",
     ]
     with get_conn() as conn:
