@@ -82,6 +82,27 @@ class Pra4ka2Tests(unittest.TestCase):
         daytime = datetime(2026, 10, 24, 9, 0, tzinfo=TZ)
         self.assertIsNone(wl._overnight_defer_run_at(daytime))
 
+    def test_overnight_defer_applies_only_to_near_term_slots(self):
+        import waitlist_service as wl
+
+        after_midnight = datetime(2026, 10, 25, 1, 30, tzinfo=TZ)
+        self.assertEqual(
+            wl._overnight_defer_for_slot("2026-10-25", after_midnight),
+            datetime(2026, 10, 25, 9, 0, tzinfo=TZ),
+        )
+        self.assertIsNone(
+            wl._overnight_defer_for_slot("2026-10-27", after_midnight)
+        )
+
+        before_midnight = datetime(2026, 10, 24, 23, 30, tzinfo=TZ)
+        self.assertEqual(
+            wl._overnight_defer_for_slot("2026-10-25", before_midnight),
+            datetime(2026, 10, 25, 9, 0, tzinfo=TZ),
+        )
+        self.assertIsNone(
+            wl._overnight_defer_for_slot("2026-10-26", before_midnight)
+        )
+
     def test_freed_slot_can_be_deferred_without_creating_booking(self):
         import waitlist_service as wl
         from unittest.mock import patch
@@ -97,7 +118,7 @@ class Pra4ka2Tests(unittest.TestCase):
         target = (datetime.now(TZ).date() + timedelta(days=1)).isoformat()
         run_at = datetime.now(TZ) + timedelta(hours=1)
 
-        with patch.object(wl, "_overnight_defer_run_at", return_value=run_at), \
+        with patch.object(wl, "_overnight_defer_for_slot", return_value=run_at), \
              patch.object(wl, "_schedule_deferred_same_day_distribution") as schedule:
             matched = asyncio.run(
                 wl.distribute_date(target, context="freed_slot")
@@ -129,7 +150,7 @@ class Pra4ka2Tests(unittest.TestCase):
             "auto",
             schedule={day: [(7, 23)] for day in range(7)},
         )
-        target = (datetime.now(TZ).date() + timedelta(days=1)).isoformat()
+        target = datetime.now(TZ).date().isoformat()
         past = datetime.now(TZ) - timedelta(minutes=1)
         with database.get_conn() as conn:
             conn.execute(
