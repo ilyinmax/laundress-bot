@@ -1746,8 +1746,64 @@ async def distribute_date(
 ) -> int:
     if not WAITLIST_ENABLED:
         return 0
+
+    date_iso = datetime.fromisoformat(str(date_iso)).date().isoformat()
+    now = datetime.now(TZ)
+    force_confirmation = context == "overnight_day"
+    consume_deferred = False
+
+    if context == "day":
+        with get_conn() as conn:
+            deferred = conn.execute(
+                "SELECT run_at FROM deferred_waitlist_distributions WHERE target_date=?",
+                (date_iso,),
+            ).fetchone()
+
+        if deferred:
+            run_at = _dt(deferred[0])
+            if run_at > now:
+                _schedule_deferred_same_day_distribution(date_iso, run_at)
+                return 0
+            context = "overnight_day"
+            force_confirmation = True
+            consume_deferred = True
+        else:
+            run_at = _overnight_defer_run_at(now)
+            if run_at is not None:
+                with get_conn() as conn:
+                    conn.execute(
+                        """
+                        INSERT INTO deferred_waitlist_distributions
+                        (target_date,run_at,created_at)
+                        VALUES (?,?,?)
+                        ON CONFLICT(target_date) DO UPDATE SET run_at=excluded.run_at
+                        """,
+                        (
+                            date_iso,
+                            run_at.isoformat(timespec="seconds"),
+                            now.isoformat(timespec="seconds"),
+                        ),
+                    )
+                _schedule_deferred_same_day_distribution(date_iso, run_at)
+                return 0
+
     async with _DISTRIBUTION_LOCK:
-        return await _distribute_date_locked(date_iso, context=context, phase=phase)
+        matched = await _distribute_date_locked(
+            date_iso,
+            context=context,
+            phase=phase,
+            force_confirmation=force_confirmation,
+        )
+
+    if consume_deferred:
+        with get_conn() as conn:
+            conn.execute(
+                "DELETE FROM deferred_waitlist_distributions WHERE target_date=?",
+                (date_iso,),
+            )
+        _remove_job(_deferred_same_day_job_id(date_iso))
+
+    return matched
 
 
 async def _distribute_date_locked(
