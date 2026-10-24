@@ -806,7 +806,7 @@ async def cancel_booking(callback: types.CallbackQuery):
         return await safe_edit(msg=callback.message, text=str(exc))
     await safe_edit(msg=callback.message, text="🗑️ Запись отменена.")
     from waitlist_service import distribute_date
-    await distribute_date(old.date, context="day")
+    await distribute_date(old.date, context="freed_slot")
 
 
 # --- Мои записи: только будущие ---
