@@ -1752,7 +1752,7 @@ async def distribute_date(
     force_confirmation = context == "overnight_day"
     consume_deferred = False
 
-    if context == "day":
+    if context in {"day", "freed_slot"}:
         with get_conn() as conn:
             deferred = conn.execute(
                 "SELECT run_at FROM deferred_waitlist_distributions WHERE target_date=?",
@@ -1767,7 +1767,7 @@ async def distribute_date(
             context = "overnight_day"
             force_confirmation = True
             consume_deferred = True
-        else:
+        elif context == "freed_slot":
             run_at = _overnight_defer_run_at(now)
             if run_at is not None:
                 with get_conn() as conn:
@@ -1786,6 +1786,7 @@ async def distribute_date(
                     )
                 _schedule_deferred_same_day_distribution(date_iso, run_at)
                 return 0
+            context = "day"
 
     async with _DISTRIBUTION_LOCK:
         matched = await _distribute_date_locked(
