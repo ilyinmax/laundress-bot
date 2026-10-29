@@ -368,12 +368,38 @@ async def users(cb:types.CallbackQuery):
         pass
 
 
-async def rebuild_feature_jobs(hours=48):
-    now,end=datetime.now(TZ),datetime.now(TZ)+timedelta(hours=hours)
+async def rebuild_feature_jobs(hours=None):
+    """
+    Restore all future reminder/card jobs after a process restart.
+
+    Jobs live in APScheduler memory, while bookings live in Neon. Limiting
+    recovery to 48 hours can permanently lose reminders for bookings created
+    three days ahead if Render restarts after those jobs were scheduled.
+    """
+    now=datetime.now(TZ)
     with get_conn() as c:
-        rows=c.execute("SELECT u.tg_id,m.name,b.date,b.hour FROM bookings b JOIN users u ON u.id=b.user_id JOIN machines m ON m.id=b.machine_id WHERE (b.date>? OR (b.date=? AND b.hour>=?)) AND (b.date<? OR (b.date=? AND b.hour<=?))",(now.date().isoformat(),now.date().isoformat(),max(0,now.hour-1),end.date().isoformat(),end.date().isoformat(),end.hour)).fetchall()
-    for tg,name,date,h in rows: await schedule_reminder(int(tg),str(name),ds(date),int(h),30)
-    with get_conn() as c: timers=c.execute("SELECT lt.booking_id,lt.ends_at FROM laundry_timers lt JOIN bookings b ON b.id=lt.booking_id WHERE lt.pickup_sent=0").fetchall()
+        rows=c.execute(
+            """
+            SELECT u.tg_id,m.name,b.date,b.hour
+            FROM bookings b
+            JOIN users u ON u.id=b.user_id
+            JOIN machines m ON m.id=b.machine_id
+            WHERE b.date>? OR (b.date=? AND b.hour>=?)
+            ORDER BY b.date,b.hour,b.id
+            """,
+            (now.date().isoformat(),now.date().isoformat(),max(0,now.hour-1)),
+        ).fetchall()
+    for tg,name,date,h in rows:
+        await schedule_reminder(int(tg),str(name),ds(date),int(h),30)
+    with get_conn() as c:
+        timers=c.execute(
+            """
+            SELECT lt.booking_id,lt.ends_at
+            FROM laundry_timers lt
+            JOIN bookings b ON b.id=lt.booking_id
+            WHERE lt.pickup_sent=0
+            """
+        ).fetchall()
     for bid,e in timers:
         try: enddt=datetime.fromisoformat(str(e))
         except Exception: continue
