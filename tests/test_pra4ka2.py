@@ -225,6 +225,42 @@ class Pra4ka2Tests(unittest.TestCase):
         self.assertFalse(next_hold.call_args.kwargs["overnight_auto"])
 
 
+    def test_restart_rebuild_restores_booking_beyond_48_hours(self):
+        from booking_service import create_booking_safe
+        import handlers.laundry_features as lf
+        from unittest.mock import AsyncMock, patch
+
+        lf.init_feature_tables()
+        target = (datetime.now(TZ).date() + timedelta(days=3)).isoformat()
+        booking = asyncio.run(
+            create_booking_safe(
+                self.uid(1001),
+                self.mid("Стиральная №1"),
+                target,
+                18,
+            )
+        )
+
+        fake_schedule = AsyncMock()
+        with patch.object(lf, "schedule_reminder", new=fake_schedule):
+            asyncio.run(lf.rebuild_feature_jobs())
+
+        calls = [
+            call.args
+            for call in fake_schedule.await_args_list
+            if int(call.args[0]) == 1001
+        ]
+        self.assertTrue(
+            any(
+                str(args[2]) == target
+                and int(args[3]) == 18
+                and int(args[4]) == 30
+                for args in calls
+            )
+        )
+        self.assertEqual(int(booking.hour), 18)
+
+
     def test_edit_machine_preferences_preserves_priority(self):
         import waitlist_service as wl
 

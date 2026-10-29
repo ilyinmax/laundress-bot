@@ -124,7 +124,7 @@ async def background_init(app: web.Application):
         print("✅ Init: ready")
 
         global REMINDERS_TASK, WH_RETRY_TASK
-        REMINDERS_TASK = asyncio.create_task(rebuild_feature_jobs(hours=48))
+        REMINDERS_TASK = asyncio.create_task(rebuild_feature_jobs())
         asyncio.create_task(rebuild_waitlist_jobs())
         if datetime.now(ZoneInfo("Europe/Moscow")).hour == 23:
             asyncio.create_task(process_night_round())
