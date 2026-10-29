@@ -49,7 +49,7 @@ async def main():
     attach_bot(bot)
     attach_feature_bot(bot)
     attach_waitlist_bot(bot)
-    await rebuild_feature_jobs(hours=48)
+    await rebuild_feature_jobs()
     await rebuild_waitlist_jobs()
     from datetime import datetime
     from zoneinfo import ZoneInfo
