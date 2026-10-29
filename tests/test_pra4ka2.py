@@ -230,6 +230,7 @@ class Pra4ka2Tests(unittest.TestCase):
         import handlers.laundry_features as lf
         from unittest.mock import AsyncMock, patch
 
+        lf.init_feature_tables()
         target = (datetime.now(TZ).date() + timedelta(days=3)).isoformat()
         booking = asyncio.run(
             create_booking_safe(
