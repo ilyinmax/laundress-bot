@@ -1430,76 +1430,98 @@ def slot_has_active_hold(machine_id: int, date_iso: str, hour: int) -> bool:
 
 def get_free_hours_effective(machine_id: int, date_iso: str) -> list[int]:
     with get_conn() as conn:
-        busy = {
-            int(r[0])
-            for r in conn.execute(
-                "SELECT hour FROM bookings WHERE machine_id=? AND date=?",
-                (int(machine_id), str(date_iso)),
-            ).fetchall()
-        }
-        held = {
+        used = {
             int(r[0])
             for r in conn.execute(
                 """
-                SELECT hour FROM slot_holds
+                SELECT hour
+                FROM bookings
+                WHERE machine_id=? AND date=?
+                UNION
+                SELECT hour
+                FROM slot_holds
                 WHERE machine_id=? AND date=? AND status='active'
                 """,
-                (int(machine_id), str(date_iso)),
+                (
+                    int(machine_id),
+                    str(date_iso),
+                    int(machine_id),
+                    str(date_iso),
+                ),
             ).fetchall()
         }
-    return [h for h in WORKING_HOURS if h not in busy and h not in held]
+    return [h for h in WORKING_HOURS if h not in used]
 
 
 def get_availability_bulk(date_isos: list[str]):
     """
-    Load active machines and free hours for several dates with three SQL queries
-    total instead of querying Neon separately for every machine/date pair.
+    Load active machines and occupied slots for several dates in one SQL
+    round-trip. Bookings and active HOLDs keep exactly the same semantics.
     """
     dates = [str(x) for x in dict.fromkeys(date_isos) if x]
     if not dates:
         return [], {}
 
     marks = ",".join("?" for _ in dates)
-    now_s = datetime.now(TZ).isoformat(timespec="seconds")
+    params = tuple(dates) + tuple(dates)
     with get_conn() as conn:
-        machines = conn.execute(
-            "SELECT id,type,name FROM machines WHERE is_active ORDER BY type,name"
-        ).fetchall()
-        booking_rows = conn.execute(
+        rows = conn.execute(
             f"""
-            SELECT machine_id,date,hour
+            SELECT 'machine' AS kind,
+                   id AS machine_id,
+                   type AS machine_type,
+                   name AS machine_name,
+                   CAST(NULL AS TEXT) AS date_text,
+                   NULL AS hour
+            FROM machines
+            WHERE is_active
+
+            UNION ALL
+
+            SELECT 'busy' AS kind,
+                   machine_id,
+                   CAST(NULL AS TEXT) AS machine_type,
+                   CAST(NULL AS TEXT) AS machine_name,
+                   CAST(date AS TEXT) AS date_text,
+                   hour
             FROM bookings
             WHERE date IN ({marks})
-            """,
-            tuple(dates),
-        ).fetchall()
-        hold_rows = conn.execute(
-            f"""
-            SELECT machine_id,date,hour
+
+            UNION ALL
+
+            SELECT 'busy' AS kind,
+                   machine_id,
+                   CAST(NULL AS TEXT) AS machine_type,
+                   CAST(NULL AS TEXT) AS machine_name,
+                   CAST(date AS TEXT) AS date_text,
+                   hour
             FROM slot_holds
             WHERE date IN ({marks})
               AND status='active'
             """,
-            tuple(dates),
+            params,
         ).fetchall()
 
+    machines = []
     busy: dict[tuple[int, str], set[int]] = {}
-    for machine_id, date_value, hour in booking_rows:
-        ds = date_value.isoformat() if hasattr(date_value, "isoformat") else str(date_value)
-        busy.setdefault((int(machine_id), ds), set()).add(int(hour))
-    for machine_id, date_value, hour in hold_rows:
-        ds = date_value.isoformat() if hasattr(date_value, "isoformat") else str(date_value)
-        busy.setdefault((int(machine_id), ds), set()).add(int(hour))
+    for kind, machine_id, machine_type, machine_name, date_text, hour in rows:
+        if str(kind) == "machine":
+            machines.append((int(machine_id), str(machine_type), str(machine_name)))
+            continue
+        if date_text is None or hour is None:
+            continue
+        busy.setdefault((int(machine_id), str(date_text)), set()).add(int(hour))
 
+    machines.sort(key=lambda row: (row[1], row[2]))
     availability: dict[str, dict[int, list[int]]] = {d: {} for d in dates}
     for machine_id, _machine_type, _machine_name in machines:
-        mid = int(machine_id)
         for date_iso in dates:
-            used = busy.get((mid, date_iso), set())
-            availability[date_iso][mid] = [h for h in WORKING_HOURS if h not in used]
+            used = busy.get((int(machine_id), date_iso), set())
+            availability[date_iso][int(machine_id)] = [
+                h for h in WORKING_HOURS if h not in used
+            ]
 
     return machines, availability
-
 
 def record_usage_history(now: datetime | None = None) -> int:
     """
