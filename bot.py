@@ -5,8 +5,9 @@ from config import BOT_TOKEN, WASHING_MACHINES, DRYERS
 from database import init_db, add_machine, get_machines_by_type
 from scheduler import setup_scheduler, attach_bot
 from waitlist_service import attach_bot as attach_waitlist_bot, process_night_round, rebuild_waitlist_jobs
+from exchange_service import attach_bot as attach_exchange_bot, rebuild_exchange_jobs
 
-from handlers import registration, booking, admin_access, admin_extra, admin, pra4ka2
+from handlers import registration, booking, admin_access, admin_extra, admin, pra4ka2, exchange
 from handlers.bot_commands import setup_bot_commands
 from handlers.laundry_features import (
     router as laundry_features_router,
@@ -33,6 +34,7 @@ async def main():
 
     dp.include_router(registration.router)
     dp.include_router(pra4ka2.router)
+    dp.include_router(exchange.router)
     dp.include_router(laundry_features_router)
     dp.include_router(booking.router)
     dp.include_router(admin_access.router)
@@ -49,8 +51,10 @@ async def main():
     attach_bot(bot)
     attach_feature_bot(bot)
     attach_waitlist_bot(bot)
+    attach_exchange_bot(bot)
     await rebuild_feature_jobs()
     await rebuild_waitlist_jobs()
+    await rebuild_exchange_jobs()
     from datetime import datetime
     from zoneinfo import ZoneInfo
     if datetime.now(ZoneInfo('Europe/Moscow')).hour == 23:
