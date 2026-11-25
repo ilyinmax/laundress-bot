@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
 from html import escape
 from zoneinfo import ZoneInfo
@@ -19,6 +20,9 @@ from database import (
     get_availability_bulk,
     get_notification_settings,
     set_notification_setting,
+    get_main_menu_state,
+    get_booking_entry_state,
+    get_user_wash_date_state,
 )
 from keyboards import build_main_menu, reply_menu
 from booking_service import create_booking_safe, DailyLimit, SlotBusy, InvalidBooking
@@ -87,11 +91,8 @@ def active_waitlist(tg_id: int) -> bool:
 
 
 def main_kb(tg_id: int):
-    from exchange_service import has_future_wash_for_tg
-    return build_main_menu(
-        active_waitlist(tg_id),
-        has_future_wash_for_tg(int(tg_id)),
-    )
+    waitlist_active, exchange_available = get_main_menu_state(int(tg_id))
+    return build_main_menu(waitlist_active, exchange_available)
 
 
 def date_text(date_iso: str) -> str:
@@ -182,12 +183,12 @@ async def home(msg: types.Message, state: FSMContext):
 @router.message(Command("book"))
 @router.message(F.text == "🧺 Записаться")
 async def start_booking(msg: types.Message, state: FSMContext):
-    if is_banned(msg.from_user.id):
+    user, banned = await asyncio.to_thread(get_booking_entry_state, msg.from_user.id)
+    if banned:
         return await msg.answer("🚫 Вы заблокированы и не можете записываться.", reply_markup=main_kb(msg.from_user.id))
-    user = get_user(msg.from_user.id)
     if not user or not user[2] or not user[3]:
         return await msg.answer("Сначала завершите регистрацию через /start.")
-    dates = booking_dates()
+    dates = await asyncio.to_thread(booking_dates)
     await state.clear()
     await state.set_state(BookFlow.date)
     await state.update_data(date_map={label: iso for label, iso in dates})
@@ -207,12 +208,19 @@ async def choose_date(msg: types.Message, state: FSMContext):
         return await msg.answer("Выберите дату кнопкой ниже.")
 
     now = datetime.now(TZ)
-    machines, availability = get_availability_bulk([date_iso])
+    availability_task = asyncio.to_thread(get_availability_bulk, [date_iso])
+    user_state_task = asyncio.to_thread(
+        get_user_wash_date_state,
+        msg.from_user.id,
+        date_iso,
+    )
+    (machines, availability), (user, wash_exists) = await asyncio.gather(
+        availability_task,
+        user_state_task,
+    )
 
     lines = [f"📅 <b>{date_text(date_iso)}</b>", ""]
     machine_map = {}
-    user = get_user(msg.from_user.id)
-    wash_exists = bool(user and has_wash_booking(int(user[0]), date_iso))
     for mid, mtype, name in machines:
         if str(mtype) == "dry" and not wash_exists:
             continue
@@ -256,7 +264,7 @@ async def choose_machine(msg: types.Message, state: FSMContext):
     if not mid:
         return await msg.answer("Выберите машинку кнопкой ниже.")
     date_iso = data["date"]
-    hours = get_free_hours_effective(int(mid), date_iso)
+    hours = await asyncio.to_thread(get_free_hours_effective, int(mid), date_iso)
     now = datetime.now(TZ)
     if date_iso == now.date().isoformat():
         hours = [h for h in hours if h > now.hour]
