@@ -990,6 +990,37 @@ def ensure_pra4ka2_tables():
             created_at TEXT NOT NULL
         )
         """,
+        """
+        CREATE TABLE IF NOT EXISTS exchange_listings (
+            id INTEGER PRIMARY KEY,
+            booking_id INTEGER NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
+            user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            machine_id_snapshot INTEGER NOT NULL REFERENCES machines(id) ON DELETE CASCADE,
+            date_snapshot TEXT NOT NULL,
+            hour_snapshot INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            closed_at TEXT,
+            closed_reason TEXT
+        )
+        """,
+        """
+        CREATE TABLE IF NOT EXISTS exchange_proposals (
+            id INTEGER PRIMARY KEY,
+            from_listing_id INTEGER NOT NULL REFERENCES exchange_listings(id) ON DELETE CASCADE,
+            to_listing_id INTEGER NOT NULL REFERENCES exchange_listings(id) ON DELETE CASCADE,
+            status TEXT NOT NULL DEFAULT 'pending',
+            created_at TEXT NOT NULL,
+            expires_at TEXT NOT NULL,
+            responded_at TEXT
+        )
+        """,
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_exchange_listing_active_booking ON exchange_listings(booking_id) WHERE status IN ('active','locked')",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_exchange_pending_from ON exchange_proposals(from_listing_id) WHERE status='pending'",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_exchange_pending_to ON exchange_proposals(to_listing_id) WHERE status='pending'",
+        "CREATE INDEX IF NOT EXISTS idx_exchange_listing_status ON exchange_listings(status, date_snapshot, hour_snapshot)",
+        "CREATE INDEX IF NOT EXISTS idx_exchange_proposal_status_expiry ON exchange_proposals(status, expires_at)",
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_pending_notice_booking ON pending_waitlist_notifications(booking_id)",
     ]
     with get_conn() as conn:
@@ -1214,6 +1245,8 @@ def ensure_pra4ka2_tables():
                 "waitlist_offer_history",
                 "laundry_usage_history",
                 "pending_waitlist_notifications",
+                "exchange_listings",
+                "exchange_proposals",
             ):
                 seq = f"{table}_id_seq"
                 try:
