@@ -370,6 +370,16 @@ class Pra4ka2Tests(unittest.TestCase):
             ["ℹ️ Помощь"],
         ])
 
+        with_exchange = build_main_menu(True, True)
+        labels = [[btn.text for btn in row] for row in with_exchange.keyboard]
+        self.assertEqual(labels, [
+            ["🔔 Лист ожидания • активен"],
+            ["📋 Мои записи"],
+            ["🔄 Обмен стирками"],
+            ["🧺 Записаться"],
+            ["ℹ️ Помощь"],
+        ])
+
 
     def test_hold_deadline_displays_minutes_only(self):
         import waitlist_service as wl
@@ -465,6 +475,108 @@ class Pra4ka2Tests(unittest.TestCase):
         current = (datetime.now(TZ).date() + timedelta(days=2)).isoformat()
         earlier = (datetime.now(TZ).date() + timedelta(days=1)).isoformat()
         self.assertTrue(wl._is_strictly_earlier_slot(earlier, 22, current, 7))
+
+    def test_exchange_button_requires_future_wash(self):
+        import exchange_service as ex
+        from booking_service import create_booking_safe
+
+        self.assertFalse(ex.has_future_wash_for_tg(1001))
+        target = (datetime.now(TZ).date() + timedelta(days=1)).isoformat()
+        asyncio.run(
+            create_booking_safe(
+                self.uid(1001),
+                self.mid("Стиральная №1"),
+                target,
+                12,
+            )
+        )
+        self.assertTrue(ex.has_future_wash_for_tg(1001))
+
+    def test_exchange_swaps_two_bookings_atomically_and_keeps_booking_ids(self):
+        import exchange_service as ex
+        from booking_service import create_booking_safe
+        from handlers.laundry_features import init_feature_tables
+
+        init_feature_tables()
+        target_a = (datetime.now(TZ).date() + timedelta(days=2)).isoformat()
+        target_b = (datetime.now(TZ).date() + timedelta(days=3)).isoformat()
+
+        a = asyncio.run(
+            create_booking_safe(
+                self.uid(1001),
+                self.mid("Стиральная №1"),
+                target_a,
+                11,
+            )
+        )
+        b = asyncio.run(
+            create_booking_safe(
+                self.uid(1002),
+                self.mid("Стиральная №1"),
+                target_b,
+                15,
+            )
+        )
+
+        la = ex.create_listing(1001, a.booking_id)
+        lb = ex.create_listing(1002, b.booking_id)
+        proposal = ex.create_proposal(1001, la, lb)
+        result = asyncio.run(ex.accept_proposal(1002, proposal.proposal_id))
+
+        with database.get_conn() as conn:
+            row_a = conn.execute(
+                "SELECT user_id,date,hour FROM bookings WHERE id=?",
+                (a.booking_id,),
+            ).fetchone()
+            row_b = conn.execute(
+                "SELECT user_id,date,hour FROM bookings WHERE id=?",
+                (b.booking_id,),
+            ).fetchone()
+            listings = conn.execute(
+                "SELECT status FROM exchange_listings WHERE id IN (?,?) ORDER BY id",
+                (la, lb),
+            ).fetchall()
+            status = conn.execute(
+                "SELECT status FROM exchange_proposals WHERE id=?",
+                (proposal.proposal_id,),
+            ).fetchone()[0]
+
+        self.assertEqual(int(row_a[0]), self.uid(1001))
+        self.assertEqual(str(row_a[1]), target_b)
+        self.assertEqual(int(row_a[2]), 15)
+        self.assertEqual(int(row_b[0]), self.uid(1002))
+        self.assertEqual(str(row_b[1]), target_a)
+        self.assertEqual(int(row_b[2]), 11)
+        self.assertEqual([str(x[0]) for x in listings], ["completed", "completed"])
+        self.assertEqual(str(status), "accepted")
+        self.assertEqual(result.from_slot.booking_id, a.booking_id)
+        self.assertEqual(result.to_slot.booking_id, b.booking_id)
+
+    def test_exchange_rejects_listing_with_linked_dryer(self):
+        import exchange_service as ex
+        from booking_service import create_booking_safe
+
+        target = (datetime.now(TZ).date() + timedelta(days=2)).isoformat()
+        wash = asyncio.run(
+            create_booking_safe(
+                self.uid(1001),
+                self.mid("Стиральная №1"),
+                target,
+                11,
+            )
+        )
+        asyncio.run(
+            create_booking_safe(
+                self.uid(1001),
+                self.mid("Сушилка №2"),
+                target,
+                12,
+            )
+        )
+
+        with self.assertRaises(ex.ExchangeUnavailable):
+            ex.create_listing(1001, wash.booking_id)
+
 
     def test_atomic_booking_reassignment_keeps_slot_occupied_and_syncs_subscriptions(self):
         import booking_service as bs
