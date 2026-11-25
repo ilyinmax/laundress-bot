@@ -618,6 +618,14 @@ async def reassign_booking_safe(
                     sync_subscription_pause_for_user(int(new_user_id))
                 except Exception:
                     pass
+                try:
+                    from exchange_service import invalidate_listing_for_booking
+                    await invalidate_listing_for_booking(
+                        int(current_booking_id),
+                        reason="booking_reassigned",
+                    )
+                except Exception:
+                    pass
 
             return old, new
         except BookingError:
