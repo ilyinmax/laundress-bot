@@ -203,14 +203,26 @@ def _build_snapshot(now: datetime) -> dict:
     return {"by_request": result, "waiting": len(requests)}
 
 
-async def get_forecast(request_id: int) -> dict | None:
-    """One shared refresh for concurrent viewers; no background DB polling."""
-    global _cache
+def get_cached_forecast(request_id: int) -> dict | None:
+    """Return a fresh cached forecast only; never triggers a DB/matching refresh."""
     now_mono = monotonic()
-    if _cache is not None and _cache["valid_until"] > now_mono:
-        return _cache["snapshot"]["by_request"].get(int(request_id))
+    if _cache is None or _cache["valid_until"] <= now_mono:
+        return None
+    return _cache["snapshot"]["by_request"].get(int(request_id))
+
+
+async def get_forecast(request_id: int) -> dict | None:
+    """One shared on-demand refresh; heavy matching runs outside the event loop."""
+    global _cache
+    cached = get_cached_forecast(int(request_id))
+    if cached is not None:
+        return cached
+
     async with _lock:
-        if _cache is None or _cache["valid_until"] <= monotonic():
-            snapshot = _build_snapshot(datetime.now(TZ))
-            _cache = {"snapshot": snapshot, "valid_until": monotonic() + CACHE_SECONDS}
+        cached = get_cached_forecast(int(request_id))
+        if cached is not None:
+            return cached
+
+        snapshot = await asyncio.to_thread(_build_snapshot, datetime.now(TZ))
+        _cache = {"snapshot": snapshot, "valid_until": monotonic() + CACHE_SECONDS}
         return _cache["snapshot"]["by_request"].get(int(request_id))
