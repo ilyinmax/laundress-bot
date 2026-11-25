@@ -378,40 +378,7 @@ def available_listings(
                 b.machine_id,
                 CAST(b.date AS TEXT),
                 b.hour,
-                m.type,
-                CASE WHEN EXISTS(
-                    SELECT 1
-                    FROM waitlist_requests wr
-                    WHERE wr.user_id=?
-                      AND wr.persistent=1
-                      AND wr.status IN ('active','matched','paused')
-                      AND wr.id=(
-                          SELECT wr2.id
-                          FROM waitlist_requests wr2
-                          WHERE wr2.user_id=?
-                            AND wr2.persistent=1
-                            AND wr2.status IN ('active','matched','paused')
-                          ORDER BY wr2.updated_at DESC,wr2.id DESC
-                          LIMIT 1
-                      )
-                      AND EXISTS(
-                          SELECT 1
-                          FROM waitlist_schedule ws
-                          WHERE ws.request_id=wr.id
-                            AND ws.weekday=CAST(strftime('%w', el.date_snapshot) AS INTEGER + 6) % 7
-                            AND ws.start_hour<=el.hour_snapshot
-                            AND ws.end_hour>el.hour_snapshot
-                      )
-                      AND (
-                          wr.any_machine=1
-                          OR EXISTS(
-                              SELECT 1
-                              FROM waitlist_machines wm
-                              WHERE wm.request_id=wr.id
-                                AND wm.machine_id=el.machine_id_snapshot
-                          )
-                      )
-                ) THEN 1 ELSE 0 END AS suitable
+                m.type
             FROM exchange_listings el
             JOIN machines m ON m.id=el.machine_id_snapshot
             LEFT JOIN bookings b ON b.id=el.booking_id
@@ -440,12 +407,43 @@ def available_listings(
             (
                 user_id,
                 user_id,
-                user_id,
-                user_id,
                 source_booking_id,
                 source_date,
             ),
         ).fetchall()
+
+        subscription_rows = conn.execute(
+            """
+            SELECT wr.id,wr.any_machine,ws.weekday,ws.start_hour,ws.end_hour,wm.machine_id
+            FROM waitlist_requests wr
+            LEFT JOIN waitlist_schedule ws ON ws.request_id=wr.id
+            LEFT JOIN waitlist_machines wm ON wm.request_id=wr.id
+            WHERE wr.id=(
+                SELECT wr2.id
+                FROM waitlist_requests wr2
+                WHERE wr2.user_id=?
+                  AND wr2.persistent=1
+                  AND wr2.status IN ('active','matched','paused')
+                ORDER BY wr2.updated_at DESC,wr2.id DESC
+                LIMIT 1
+            )
+            """,
+            (user_id,),
+        ).fetchall()
+
+        subscription_any = False
+        subscription_schedule: dict[int, list[tuple[int, int]]] = {}
+        subscription_machines: set[int] = set()
+        for _rid, any_machine, weekday, start_hour, end_hour, machine_id in subscription_rows:
+            subscription_any = bool(any_machine)
+            if weekday is not None and start_hour is not None and end_hour is not None:
+                interval = (int(start_hour), int(end_hour))
+                intervals = subscription_schedule.setdefault(int(weekday), [])
+                if interval not in intervals:
+                    intervals.append(interval)
+            if machine_id is not None:
+                subscription_machines.add(int(machine_id))
+
 
         stale_ids = []
         views = []
@@ -472,7 +470,19 @@ def available_listings(
                     date=str(row[5]),
                     hour=int(row[6]),
                     status=str(row[7]),
-                    suitable=bool(row[13]),
+                    suitable=(
+                        any(
+                            start_hour <= int(row[6]) < end_hour
+                            for start_hour, end_hour in subscription_schedule.get(
+                                datetime.fromisoformat(str(row[5])).date().weekday(),
+                                [],
+                            )
+                        )
+                        and (
+                            subscription_any
+                            or int(row[3]) in subscription_machines
+                        )
+                    ),
                 )
             )
 
