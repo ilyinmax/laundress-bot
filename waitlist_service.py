@@ -1526,7 +1526,7 @@ async def _send_auto_confirmation(req: Request, result, *, night: bool) -> None:
             text,
             parse_mode="HTML",
             disable_notification=_quiet_for(req.user_id),
-            reply_markup=build_main_menu(False),
+            reply_markup=build_main_menu(False, True),
         )
         await _send_dryer_offer(req.tg_id, result)
     except Exception:
@@ -2219,7 +2219,7 @@ async def send_pending_notifications() -> int:
             await BOT.send_message(
                 int(tg), str(text), parse_mode="HTML",
                 disable_notification=_quiet_for(int(uid)),
-                reply_markup=build_main_menu(False),
+                reply_markup=build_main_menu(False, True),
             )
         except TelegramRetryAfter as exc:
             await asyncio.sleep(float(exc.retry_after) + 0.2)
@@ -2227,7 +2227,7 @@ async def send_pending_notifications() -> int:
                 await BOT.send_message(
                     int(tg), str(text), parse_mode="HTML",
                     disable_notification=_quiet_for(int(uid)),
-                    reply_markup=build_main_menu(False),
+                    reply_markup=build_main_menu(False, True),
                 )
             except Exception:
                 continue
