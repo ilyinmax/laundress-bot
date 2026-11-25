@@ -274,7 +274,7 @@ if DATABASE_URL:
     from psycopg2 import pool
 
     # держим несколько постоянных коннектов, без пересоздания на каждый SELECT
-    _pg_pool = pool.SimpleConnectionPool(
+    _pg_pool = pool.ThreadedConnectionPool(
         1, 10,  # min/max
         DATABASE_URL,
         connect_timeout=3,
