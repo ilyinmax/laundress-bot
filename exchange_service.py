@@ -257,7 +257,20 @@ def create_listing(tg_id: int, booking_id: int) -> int:
                 now_s,
             ),
         )
-        listing_id = int(cur.lastrowid)
+        listing_id = getattr(cur, "lastrowid", None)
+        if not listing_id:
+            saved = conn.execute(
+                """
+                SELECT id FROM exchange_listings
+                WHERE booking_id=? AND status='active'
+                ORDER BY id DESC LIMIT 1
+                """,
+                (slot.booking_id,),
+            ).fetchone()
+            if not saved:
+                raise ExchangeConflict("Не удалось создать объявление обмена.")
+            listing_id = int(saved[0])
+        listing_id = int(listing_id)
 
     _schedule_listing_expiry(listing_id, slot.date, slot.hour)
     return listing_id
@@ -345,6 +358,11 @@ def available_listings(
                         "UPDATE exchange_listings SET status='stale',closed_at=?,closed_reason='booking_changed',updated_at=? WHERE id=?",
                         (now.isoformat(timespec="seconds"), now.isoformat(timespec="seconds"), listing_id),
                     )
+                continue
+        with get_conn() as conn:
+            if _daily_limit_conflict(conn, user_id, _ds(row[5]), int(source[1])):
+                continue
+            if _daily_limit_conflict(conn, int(row[2]), str(source[4]), int(row[1])):
                 continue
         views.append(
             ListingView(
@@ -436,6 +454,22 @@ def create_proposal(tg_id: int, from_listing_id: int, to_listing_id: int) -> Pro
             raise ExchangeUnavailable("До одной из стирок осталось слишком мало времени.")
 
         now_s = now.isoformat(timespec="seconds")
+        cooldown_since = (now - timedelta(minutes=30)).isoformat(timespec="seconds")
+        cooldown = conn.execute(
+            """
+            SELECT 1
+            FROM exchange_proposals
+            WHERE from_listing_id=? AND to_listing_id=?
+              AND status IN ('declined','expired')
+              AND responded_at IS NOT NULL
+              AND responded_at>=?
+            LIMIT 1
+            """,
+            (int(from_listing_id), int(to_listing_id), cooldown_since),
+        ).fetchone()
+        if cooldown:
+            raise ExchangeConflict("Этому пользователю уже недавно предлагали этот обмен. Попробуйте позже.")
+
         try:
             cur = conn.execute(
                 """
@@ -450,7 +484,20 @@ def create_proposal(tg_id: int, from_listing_id: int, to_listing_id: int) -> Pro
                     expires_at.isoformat(timespec="seconds"),
                 ),
             )
-            proposal_id = int(cur.lastrowid)
+            proposal_id = getattr(cur, "lastrowid", None)
+            if not proposal_id:
+                saved = conn.execute(
+                    """
+                    SELECT id FROM exchange_proposals
+                    WHERE from_listing_id=? AND to_listing_id=? AND status='pending'
+                    ORDER BY id DESC LIMIT 1
+                    """,
+                    (int(from_listing_id), int(to_listing_id)),
+                ).fetchone()
+                if not saved:
+                    raise ExchangeConflict("Не удалось создать предложение обмена.")
+                proposal_id = int(saved[0])
+            proposal_id = int(proposal_id)
             conn.execute(
                 "UPDATE exchange_listings SET status='locked',updated_at=? WHERE id IN (?,?)",
                 (now_s, int(from_listing_id), int(to_listing_id)),
