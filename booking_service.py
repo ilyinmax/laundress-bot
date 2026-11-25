@@ -465,6 +465,14 @@ async def cancel_booking_safe(
                     sync_subscription_pause_for_user(int(booking.user_id))
                 except Exception:
                     pass
+                try:
+                    from exchange_service import invalidate_listing_for_booking
+                    await invalidate_listing_for_booking(
+                        int(booking.booking_id),
+                        reason="booking_cancelled",
+                    )
+                except Exception:
+                    pass
 
             return booking
         except BookingError:
@@ -661,6 +669,14 @@ async def move_booking_safe(
             )
             conn.execute("DELETE FROM bookings WHERE id=?", (int(current_booking_id),))
             _commit(raw)
+            try:
+                from exchange_service import invalidate_listing_for_booking
+                await invalidate_listing_for_booking(
+                    int(current_booking_id),
+                    reason="booking_moved",
+                )
+            except Exception:
+                pass
             return old, new
         except BookingError:
             _rollback(raw)
