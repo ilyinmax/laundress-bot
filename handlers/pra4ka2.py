@@ -609,7 +609,7 @@ def _compact_schedule(schedule: dict[int, list[tuple[int, int]]]) -> str:
     return "\n".join(lines)
 
 
-async def _waitlist_summary(tg_id: int) -> str:
+async def _waitlist_summary(tg_id: int, *, fast: bool = False) -> str:
     req = get_active_request_for_tg(tg_id)
     if not req:
         return ""
@@ -706,11 +706,11 @@ async def _waitlist_summary(tg_id: int) -> str:
         "",
     ]
     try:
-        from forecast_service import get_forecast
-        forecast = await get_forecast(int(rid))
+        from forecast_service import get_cached_forecast, get_forecast
+        forecast = get_cached_forecast(int(rid))
+        if forecast is None and not fast:
+            forecast = await get_forecast(int(rid))
     except Exception:
-        # The forecast is informative only. Never make the subscription
-        # screen fail or block the actual booking flow.
         forecast = None
     if forecast is not None:
         lines += [
@@ -725,7 +725,7 @@ async def _waitlist_summary(tg_id: int) -> str:
             f"👥 Сейчас в очереди: <b>{int(forecast['waiting'])} человек</b>",
         ]
     else:
-        lines.append("Прогноз временно недоступен. Подписка продолжает работать.")
+        lines.append("⏳ Прогноз обновляется. Подписка продолжает работать.")
     return "\n".join(lines) + settings
 
 
@@ -742,7 +742,7 @@ async def waitlist_home(msg: types.Message, state: FSMContext):
     user = get_user(msg.from_user.id)
     if not user or not user[2] or not user[3]:
         return await msg.answer("Сначала завершите регистрацию через /start.")
-    summary = await _waitlist_summary(msg.from_user.id)
+    summary = await _waitlist_summary(msg.from_user.id, fast=True)
     if summary:
         rows = [
             ["✏️ Изменить подписку"],
@@ -767,7 +767,28 @@ async def waitlist_home(msg: types.Message, state: FSMContext):
             return await msg.answer(
                 "Управление подпиской", reply_markup=reply_menu(rows)
             )
-        return await msg.answer(summary, parse_mode="HTML", reply_markup=reply_menu(rows))
+        sent = await msg.answer(summary, parse_mode="HTML", reply_markup=reply_menu(rows))
+        try:
+            req = get_active_request_for_tg(msg.from_user.id)
+            if req:
+                from forecast_service import get_cached_forecast, get_forecast
+                if get_cached_forecast(int(req[0])) is None:
+                    async def _refresh_forecast_message():
+                        try:
+                            await get_forecast(int(req[0]))
+                            fresh = await _waitlist_summary(msg.from_user.id)
+                            if fresh and fresh != summary:
+                                await sent.edit_text(
+                                    fresh,
+                                    parse_mode="HTML",
+                                    reply_markup=reply_menu(rows),
+                                )
+                        except Exception:
+                            pass
+                    asyncio.create_task(_refresh_forecast_message())
+        except Exception:
+            pass
+        return sent
     rows = [
         ["➕ Создать подписку"],
         ["⚙️ Настройки уведомлений"],
