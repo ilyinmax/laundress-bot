@@ -1064,6 +1064,7 @@ class Pra4ka2Tests(unittest.TestCase):
 
     def test_unopened_future_date_is_not_distributed_by_day_paths(self):
         import waitlist_service as wl
+        from unittest.mock import AsyncMock, patch
 
         now = datetime.now(TZ)
         target = (now.date() + timedelta(days=4)).isoformat()
