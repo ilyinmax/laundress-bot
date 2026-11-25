@@ -712,6 +712,95 @@ def get_user(tg_id):
         if not row: return None
         return (row[0], row[1], _b64d_try(row[2]), _b64d_try(row[3]))
 
+def get_main_menu_state(tg_id: int, now: datetime | None = None) -> tuple[bool, bool]:
+    """Return (persistent_waitlist_exists, future_wash_exists) in one DB round-trip."""
+    now = now or datetime.now(TZ)
+    today = now.date().isoformat()
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT
+                EXISTS(
+                    SELECT 1
+                    FROM waitlist_requests wr
+                    JOIN users u1 ON u1.id=wr.user_id
+                    WHERE u1.tg_id=?
+                      AND wr.persistent=1
+                      AND wr.status IN ('active','matched','paused')
+                ),
+                EXISTS(
+                    SELECT 1
+                    FROM bookings b
+                    JOIN users u2 ON u2.id=b.user_id
+                    JOIN machines m ON m.id=b.machine_id
+                    WHERE u2.tg_id=?
+                      AND m.type='wash'
+                      AND (
+                          b.date>?
+                          OR (b.date=? AND b.hour>?)
+                      )
+                )
+            """,
+            (int(tg_id), int(tg_id), today, today, int(now.hour)),
+        ).fetchone()
+    return (bool(row and row[0]), bool(row and row[1]))
+
+
+def get_booking_entry_state(tg_id: int, now: datetime | None = None):
+    """Return (decoded_user, is_banned) with one read query."""
+    now = now or datetime.now(TZ)
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT u.id,u.tg_id,u.surname,u.room,b.banned_until
+            FROM users u
+            LEFT JOIN banned b ON b.tg_id=u.tg_id
+            WHERE u.tg_id=?
+            """,
+            (int(tg_id),),
+        ).fetchone()
+        if not row:
+            return None, False
+
+        banned = False
+        until = row[4]
+        if until:
+            try:
+                banned = datetime.fromisoformat(str(until)) > now
+            except Exception:
+                banned = True
+            if not banned:
+                conn.execute("DELETE FROM banned WHERE tg_id=?", (int(tg_id),))
+
+        user = (int(row[0]), int(row[1]), _b64d_try(row[2]), _b64d_try(row[3]))
+        return user, banned
+
+
+def get_user_wash_date_state(tg_id: int, date_iso: str):
+    """Return (decoded_user, has_wash_on_date) in one DB round-trip."""
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT u.id,u.tg_id,u.surname,u.room,
+                   EXISTS(
+                       SELECT 1
+                       FROM bookings b
+                       JOIN machines m ON m.id=b.machine_id
+                       WHERE b.user_id=u.id
+                         AND m.type='wash'
+                         AND b.date=?
+                   )
+            FROM users u
+            WHERE u.tg_id=?
+            """,
+            (str(date_iso), int(tg_id)),
+        ).fetchone()
+    if not row:
+        return None, False
+    user = (int(row[0]), int(row[1]), _b64d_try(row[2]), _b64d_try(row[3]))
+    return user, bool(row[4])
+
+
 def get_incomplete_users():
     """Пользователи без фамилии или комнаты."""
     with get_conn() as conn:
