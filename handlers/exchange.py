@@ -43,6 +43,14 @@ def _main_kb(tg_id: int):
     return build_main_menu(waitlist_active, exchange_available)
 
 
+async def _main_kb_async(tg_id: int):
+    waitlist_active, exchange_available = await asyncio.to_thread(
+        get_main_menu_state,
+        int(tg_id),
+    )
+    return build_main_menu(waitlist_active, exchange_available)
+
+
 def _date_short(date_iso: str) -> str:
     d = datetime.fromisoformat(str(date_iso)).date()
     return f"{WEEKDAYS_SHORT[d.weekday()]}, {d.day} {MONTHS[d.month]}"
@@ -96,7 +104,7 @@ async def _show_exchange_home(message: types.Message, tg_id: int, booking_id: in
         return await message.answer(
             "🔄 Для обмена нужна предстоящая запись на стирку.\n\n"
             "Чтобы получить новое место, используйте лист ожидания.",
-            reply_markup=_main_kb(int(tg_id)),
+            reply_markup=await _main_kb_async(int(tg_id)),
         )
 
     if booking_id is None and len(bookings) > 1:
@@ -123,7 +131,7 @@ async def _show_exchange_home(message: types.Message, tg_id: int, booking_id: in
     if not slot:
         return await message.answer(
             "Эта запись уже недоступна.",
-            reply_markup=_main_kb(int(tg_id)),
+            reply_markup=await _main_kb_async(int(tg_id)),
         )
 
     listing = listing_for_booking(slot.booking_id)
@@ -444,7 +452,7 @@ async def exchange_accept(cb: types.CallbackQuery):
             "Ваша новая запись:\n"
             f"{_slot_text(result.from_slot)}",
             parse_mode="HTML",
-            reply_markup=_main_kb(result.from_slot.tg_id),
+            reply_markup=await _main_kb_async(result.from_slot.tg_id),
         )
     except Exception:
         pass
