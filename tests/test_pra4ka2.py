@@ -1062,6 +1062,50 @@ class Pra4ka2Tests(unittest.TestCase):
         self.assertTrue(dry_booking.booking_id)
 
 
+    def test_unopened_future_date_is_not_distributed_by_day_paths(self):
+        import waitlist_service as wl
+
+        now = datetime.now(TZ)
+        target = (now.date() + timedelta(days=4)).isoformat()
+        wl.save_request(
+            1001,
+            [],
+            [],
+            True,
+            "auto",
+            schedule={day: [(7, 23)] for day in range(7)},
+        )
+
+        with patch.object(wl, "_distribute_date_locked", new=AsyncMock(return_value=1)) as locked:
+            matched = asyncio.run(wl.distribute_date(target, context="day"))
+            self.assertEqual(matched, 0)
+            locked.assert_not_called()
+
+            matched = asyncio.run(wl.distribute_date(target, context="freed_slot"))
+            self.assertEqual(matched, 0)
+            locked.assert_not_called()
+
+    def test_recorded_night_round_opens_target_for_redistribution(self):
+        import waitlist_service as wl
+
+        now = datetime.now(TZ)
+        target = (now.date() + timedelta(days=4)).isoformat()
+        with database.get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO waitlist_rounds(target_date,cutoff_at,started_at,status,finished_at)
+                VALUES (?,?,?,'finished',?)
+                """,
+                (
+                    target,
+                    (now - timedelta(minutes=10)).isoformat(timespec="seconds"),
+                    (now - timedelta(minutes=10)).isoformat(timespec="seconds"),
+                    (now - timedelta(minutes=5)).isoformat(timespec="seconds"),
+                ),
+            )
+
+        self.assertTrue(wl._distribution_date_is_open(target, now=now))
+
     def test_existing_free_slot_is_found_after_request_creation(self):
         import waitlist_service as wl
 
