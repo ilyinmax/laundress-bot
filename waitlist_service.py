@@ -1245,6 +1245,51 @@ def public_waitlist_dates(now: datetime | None = None) -> list[str]:
     return [(now.date() + timedelta(days=offset)).isoformat() for offset in offsets]
 
 
+def _distribution_date_is_open(
+    date_iso: str,
+    *,
+    now: datetime | None = None,
+) -> bool:
+    """
+    Return whether matching is allowed to touch this date right now.
+
+    Ordinary day/freed-slot distribution may only use dates already visible to
+    normal booking. The one exception is a date that has been explicitly
+    opened by a recorded night round; this keeps legitimate night-round
+    cancellations redistributable without letting an arbitrary future date
+    trigger matching.
+    """
+    now = now or datetime.now(TZ)
+    date_iso = datetime.fromisoformat(str(date_iso)).date().isoformat()
+
+    if date_iso in public_waitlist_dates(now):
+        return True
+
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT cutoff_at,status
+            FROM waitlist_rounds
+            WHERE target_date=?
+            """,
+            (date_iso,),
+        ).fetchone()
+
+    if not row or not row[0]:
+        return False
+    try:
+        cutoff = _dt(row[0])
+    except Exception:
+        return False
+
+    return cutoff <= now and str(row[1]) in {
+        "matching",
+        "holds_pending",
+        "holds_running",
+        "finished",
+    }
+
+
 async def check_active_waitlist() -> int:
     """Fallback polling for slots that were already free before a request appeared."""
     if not WAITLIST_ENABLED:
@@ -1773,6 +1818,13 @@ async def distribute_date(
 
     date_iso = datetime.fromisoformat(str(date_iso)).date().isoformat()
     now = datetime.now(TZ)
+
+    # Safety boundary: no day/freed-slot/HOLD callback may accidentally open
+    # and distribute an arbitrary future date. A date becomes eligible only
+    # when it is already public or when the official night round recorded it.
+    if not _distribution_date_is_open(date_iso, now=now):
+        return 0
+
     force_confirmation = context in {"overnight_day_first", "overnight_day"}
     consume_deferred = False
 
