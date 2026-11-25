@@ -55,14 +55,11 @@ async def start_cmd(msg: types.Message, state: FSMContext):
         text = ("👋 <b>С возвращением!</b>\n\n"
                 "Вы уже зарегистрированы.\n"
                 "Выберите действие из меню ниже 👇")
-        from waitlist_service import get_active_request_for_tg
-        from exchange_service import has_future_wash_for_tg
+        from database import get_main_menu_state
+        waitlist_active, exchange_available = get_main_menu_state(tg_id)
         return await msg.answer(
             text,
-            reply_markup=build_main_menu(
-                bool(get_active_request_for_tg(tg_id)),
-                has_future_wash_for_tg(tg_id),
-            ),
+            reply_markup=build_main_menu(waitlist_active, exchange_available),
             parse_mode="HTML",
         )
 
@@ -183,14 +180,11 @@ async def edit_room(msg: types.Message, state: FSMContext):
     surname = data.get("surname", "").strip()
 
     save_user(tg_id, surname, room)
-    from waitlist_service import get_active_request_for_tg
-    from exchange_service import has_future_wash_for_tg
+    from database import get_main_menu_state
+    waitlist_active, exchange_available = get_main_menu_state(tg_id)
     await msg.answer(
         f"✅ Данные обновлены!\nФамилия: {surname}\nКомната: {room}",
-        reply_markup=build_main_menu(
-            bool(get_active_request_for_tg(tg_id)),
-            has_future_wash_for_tg(tg_id),
-        ),
+        reply_markup=build_main_menu(waitlist_active, exchange_available),
     )
     await state.clear()
 
