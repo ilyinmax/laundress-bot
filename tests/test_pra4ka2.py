@@ -476,6 +476,61 @@ class Pra4ka2Tests(unittest.TestCase):
         earlier = (datetime.now(TZ).date() + timedelta(days=1)).isoformat()
         self.assertTrue(wl._is_strictly_earlier_slot(earlier, 22, current, 7))
 
+    def test_batched_main_menu_state_matches_existing_rules(self):
+        from booking_service import create_booking_safe
+        import database
+        import waitlist_service as wl
+
+        self.assertEqual(database.get_main_menu_state(1001), (False, False))
+
+        wl.save_request(
+            1001,
+            [],
+            [],
+            True,
+            "auto",
+            schedule={day: [(7, 23)] for day in range(7)},
+        )
+        self.assertEqual(database.get_main_menu_state(1001), (True, False))
+
+        target = (datetime.now(TZ).date() + timedelta(days=1)).isoformat()
+        asyncio.run(
+            create_booking_safe(
+                self.uid(1001),
+                self.mid("Стиральная №1"),
+                target,
+                12,
+            )
+        )
+        self.assertEqual(database.get_main_menu_state(1001), (True, True))
+
+    def test_bulk_availability_still_respects_active_holds(self):
+        import database
+
+        target = (datetime.now(TZ).date() + timedelta(days=1)).isoformat()
+        mid = self.mid("Стиральная №1")
+        with database.get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO slot_holds
+                (request_id,user_id,machine_id,date,hour,status,context,created_at,expires_at)
+                VALUES (NULL,?,?,?,?, 'active','day',?,?)
+                """,
+                (
+                    self.uid(1001),
+                    mid,
+                    target,
+                    13,
+                    datetime.now(TZ).isoformat(timespec="seconds"),
+                    (datetime.now(TZ) + timedelta(minutes=5)).isoformat(timespec="seconds"),
+                ),
+            )
+
+        machines, availability = database.get_availability_bulk([target])
+        self.assertTrue(machines)
+        self.assertNotIn(13, availability[target][mid])
+
+
     def test_exchange_button_requires_future_wash(self):
         import exchange_service as ex
         from booking_service import create_booking_safe

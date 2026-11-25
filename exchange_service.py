@@ -319,71 +319,189 @@ def available_listings(
     page_size: int = EXCHANGE_PAGE_SIZE,
 ) -> tuple[list[ListingView], int]:
     now = datetime.now(TZ)
-    user = get_user(int(tg_id))
-    if not user:
-        raise ExchangeUnavailable("Пользователь не найден.")
-    user_id = int(user[0])
+    now_s = now.isoformat(timespec="seconds")
 
     with get_conn() as conn:
-        source = _active_listing_row(conn, int(from_listing_id))
-        if not source or int(source[2]) != user_id or str(source[6]) != "active":
+        source = conn.execute(
+            """
+            SELECT el.id,el.booking_id,el.user_id,el.machine_id_snapshot,
+                   el.date_snapshot,el.hour_snapshot,el.status,
+                   b.user_id,b.machine_id,CAST(b.date AS TEXT),b.hour,m.type
+            FROM exchange_listings el
+            LEFT JOIN bookings b ON b.id=el.booking_id
+            LEFT JOIN machines m ON m.id=b.machine_id
+            JOIN users u ON u.id=el.user_id
+            WHERE el.id=? AND u.tg_id=? AND el.status IN ('active','locked')
+            """,
+            (int(from_listing_id), int(tg_id)),
+        ).fetchone()
+
+        if not source or str(source[6]) != "active":
             raise ExchangeUnavailable("Ваша запись сейчас недоступна для обмена.")
-        if not _listing_snapshot_matches(conn, source, now=now):
+
+        source_valid = (
+            source[7] is not None
+            and int(source[7]) == int(source[2])
+            and int(source[8]) == int(source[3])
+            and str(source[9]) == str(source[4])
+            and int(source[10]) == int(source[5])
+            and str(source[11]) == "wash"
+            and _lead_ok(str(source[4]), int(source[5]), now=now)
+        )
+        if not source_valid:
             conn.execute(
-                "UPDATE exchange_listings SET status='stale',closed_at=?,closed_reason='booking_changed',updated_at=? WHERE id=?",
-                (now.isoformat(timespec="seconds"), now.isoformat(timespec="seconds"), int(from_listing_id)),
+                """
+                UPDATE exchange_listings
+                SET status='stale',closed_at=?,closed_reason='booking_changed',updated_at=?
+                WHERE id=?
+                """,
+                (now_s, now_s, int(from_listing_id)),
             )
             raise ExchangeUnavailable("Ваша запись изменилась. Объявление снято.")
 
+        user_id = int(source[2])
+        source_booking_id = int(source[1])
+        source_date = str(source[4])
+
         rows = conn.execute(
             """
-            SELECT el.id,el.booking_id,el.user_id,el.machine_id_snapshot,m.name,
-                   el.date_snapshot,el.hour_snapshot,el.status
+            SELECT
+                el.id,
+                el.booking_id,
+                el.user_id,
+                el.machine_id_snapshot,
+                m.name,
+                el.date_snapshot,
+                el.hour_snapshot,
+                el.status,
+                b.user_id,
+                b.machine_id,
+                CAST(b.date AS TEXT),
+                b.hour,
+                m.type
             FROM exchange_listings el
             JOIN machines m ON m.id=el.machine_id_snapshot
-            WHERE el.status='active' AND el.user_id<>?
+            LEFT JOIN bookings b ON b.id=el.booking_id
+            WHERE el.status='active'
+              AND el.user_id<>?
+              AND NOT EXISTS(
+                  SELECT 1
+                  FROM bookings bx
+                  JOIN machines mx ON mx.id=bx.machine_id
+                  WHERE bx.user_id=?
+                    AND mx.type='wash'
+                    AND CAST(bx.date AS TEXT)=el.date_snapshot
+                    AND bx.id<>?
+              )
+              AND NOT EXISTS(
+                  SELECT 1
+                  FROM bookings by2
+                  JOIN machines my2 ON my2.id=by2.machine_id
+                  WHERE by2.user_id=el.user_id
+                    AND my2.type='wash'
+                    AND CAST(by2.date AS TEXT)=?
+                    AND by2.id<>el.booking_id
+              )
             ORDER BY el.date_snapshot,el.hour_snapshot,el.id
+            """,
+            (
+                user_id,
+                user_id,
+                source_booking_id,
+                source_date,
+            ),
+        ).fetchall()
+
+        subscription_rows = conn.execute(
+            """
+            SELECT wr.id,wr.any_machine,ws.weekday,ws.start_hour,ws.end_hour,wm.machine_id
+            FROM waitlist_requests wr
+            LEFT JOIN waitlist_schedule ws ON ws.request_id=wr.id
+            LEFT JOIN waitlist_machines wm ON wm.request_id=wr.id
+            WHERE wr.id=(
+                SELECT wr2.id
+                FROM waitlist_requests wr2
+                WHERE wr2.user_id=?
+                  AND wr2.persistent=1
+                  AND wr2.status IN ('active','matched','paused')
+                ORDER BY wr2.updated_at DESC,wr2.id DESC
+                LIMIT 1
+            )
             """,
             (user_id,),
         ).fetchall()
 
-    views = []
-    for row in rows:
-        listing_id = int(row[0])
-        with get_conn() as conn:
-            fresh = _active_listing_row(conn, listing_id)
-            if not fresh or not _listing_snapshot_matches(conn, fresh, now=now):
-                if fresh:
-                    conn.execute(
-                        "UPDATE exchange_listings SET status='stale',closed_at=?,closed_reason='booking_changed',updated_at=? WHERE id=?",
-                        (now.isoformat(timespec="seconds"), now.isoformat(timespec="seconds"), listing_id),
-                    )
-                continue
-        with get_conn() as conn:
-            if _daily_limit_conflict(conn, user_id, _ds(row[5]), int(source[1])):
-                continue
-            if _daily_limit_conflict(conn, int(row[2]), str(source[4]), int(row[1])):
-                continue
-        views.append(
-            ListingView(
-                listing_id=listing_id,
-                booking_id=int(row[1]),
-                user_id=int(row[2]),
-                machine_id=int(row[3]),
-                machine_name=str(row[4]),
-                date=_ds(row[5]),
-                hour=int(row[6]),
-                status=str(row[7]),
-                suitable=_subscription_matches(user_id, int(row[3]), _ds(row[5]), int(row[6])),
+        subscription_any = False
+        subscription_schedule: dict[int, list[tuple[int, int]]] = {}
+        subscription_machines: set[int] = set()
+        for _rid, any_machine, weekday, start_hour, end_hour, machine_id in subscription_rows:
+            subscription_any = bool(any_machine)
+            if weekday is not None and start_hour is not None and end_hour is not None:
+                interval = (int(start_hour), int(end_hour))
+                intervals = subscription_schedule.setdefault(int(weekday), [])
+                if interval not in intervals:
+                    intervals.append(interval)
+            if machine_id is not None:
+                subscription_machines.add(int(machine_id))
+
+
+        stale_ids = []
+        views = []
+        for row in rows:
+            valid = (
+                row[8] is not None
+                and int(row[8]) == int(row[2])
+                and int(row[9]) == int(row[3])
+                and str(row[10]) == str(row[5])
+                and int(row[11]) == int(row[6])
+                and str(row[12]) == "wash"
+                and _lead_ok(str(row[5]), int(row[6]), now=now)
             )
-        )
+            if not valid:
+                stale_ids.append(int(row[0]))
+                continue
+            views.append(
+                ListingView(
+                    listing_id=int(row[0]),
+                    booking_id=int(row[1]),
+                    user_id=int(row[2]),
+                    machine_id=int(row[3]),
+                    machine_name=str(row[4]),
+                    date=str(row[5]),
+                    hour=int(row[6]),
+                    status=str(row[7]),
+                    suitable=(
+                        any(
+                            start_hour <= int(row[6]) < end_hour
+                            for start_hour, end_hour in subscription_schedule.get(
+                                datetime.fromisoformat(str(row[5])).date().weekday(),
+                                [],
+                            )
+                        )
+                        and (
+                            subscription_any
+                            or int(row[3]) in subscription_machines
+                        )
+                    ),
+                )
+            )
+
+        if stale_ids:
+            marks = ",".join("?" for _ in stale_ids)
+            conn.execute(
+                f"""
+                UPDATE exchange_listings
+                SET status='stale',closed_at=?,closed_reason='booking_changed',updated_at=?
+                WHERE id IN ({marks})
+                """,
+                (now_s, now_s, *stale_ids),
+            )
 
     views.sort(key=lambda x: (not x.suitable, x.date, x.hour, x.listing_id))
     total_pages = max(1, (len(views) + page_size - 1) // page_size)
     page = max(0, min(int(page), total_pages - 1))
     start = page * page_size
     return views[start : start + page_size], total_pages
-
 
 def get_listing_view(listing_id: int) -> ListingView | None:
     with get_conn() as conn:

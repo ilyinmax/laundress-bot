@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -8,7 +9,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from config import TIMEZONE
 from keyboards import build_main_menu
-from waitlist_service import get_active_request_for_tg
+from database import get_main_menu_state
 from exchange_service import (
     ExchangeError,
     ExchangeConflict,
@@ -38,10 +39,16 @@ WEEKDAYS_SHORT = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
 
 
 def _main_kb(tg_id: int):
-    return build_main_menu(
-        bool(get_active_request_for_tg(int(tg_id))),
-        has_future_wash_for_tg(int(tg_id)),
+    waitlist_active, exchange_available = get_main_menu_state(int(tg_id))
+    return build_main_menu(waitlist_active, exchange_available)
+
+
+async def _main_kb_async(tg_id: int):
+    waitlist_active, exchange_available = await asyncio.to_thread(
+        get_main_menu_state,
+        int(tg_id),
     )
+    return build_main_menu(waitlist_active, exchange_available)
 
 
 def _date_short(date_iso: str) -> str:
@@ -92,12 +99,12 @@ def _home_markup(booking_id: int, listing_id: int | None, locked: bool = False):
 
 
 async def _show_exchange_home(message: types.Message, tg_id: int, booking_id: int | None = None):
-    bookings = future_wash_bookings_for_tg(int(tg_id))
+    bookings = await asyncio.to_thread(future_wash_bookings_for_tg, int(tg_id))
     if not bookings:
         return await message.answer(
             "🔄 Для обмена нужна предстоящая запись на стирку.\n\n"
             "Чтобы получить новое место, используйте лист ожидания.",
-            reply_markup=_main_kb(int(tg_id)),
+            reply_markup=await _main_kb_async(int(tg_id)),
         )
 
     if booking_id is None and len(bookings) > 1:
@@ -124,7 +131,7 @@ async def _show_exchange_home(message: types.Message, tg_id: int, booking_id: in
     if not slot:
         return await message.answer(
             "Эта запись уже недоступна.",
-            reply_markup=_main_kb(int(tg_id)),
+            reply_markup=await _main_kb_async(int(tg_id)),
         )
 
     listing = listing_for_booking(slot.booking_id)
@@ -179,7 +186,7 @@ async def exchange_home_callback(cb: types.CallbackQuery):
 async def exchange_list(cb: types.CallbackQuery):
     try:
         booking_id = int(cb.data.removeprefix("ex_list_"))
-        listing_id = create_listing(cb.from_user.id, booking_id)
+        listing_id = await asyncio.to_thread(create_listing, cb.from_user.id, booking_id)
     except ExchangeError as exc:
         return await cb.answer(str(exc), show_alert=True)
     except Exception:
@@ -222,7 +229,8 @@ async def _render_catalog(
     edit: bool,
 ):
     try:
-        rows, pages = available_listings(
+        rows, pages = await asyncio.to_thread(
+            available_listings,
             int(tg_id),
             int(source_listing_id),
             page=int(page),
@@ -318,8 +326,10 @@ async def exchange_pick(cb: types.CallbackQuery):
     except Exception:
         return await cb.answer("Некорректный обмен.", show_alert=True)
 
-    source = get_listing_view(source_id)
-    target = get_listing_view(target_id)
+    source, target = await asyncio.gather(
+        asyncio.to_thread(get_listing_view, source_id),
+        asyncio.to_thread(get_listing_view, target_id),
+    )
     if not source or not target or source.status != "active" or target.status != "active":
         return await cb.answer("Этот вариант уже недоступен.", show_alert=True)
 
@@ -355,7 +365,12 @@ async def exchange_offer(cb: types.CallbackQuery):
     try:
         raw = cb.data.removeprefix("ex_offer_")
         source_s, target_s = raw.split("_")
-        result = create_proposal(cb.from_user.id, int(source_s), int(target_s))
+        result = await asyncio.to_thread(
+            create_proposal,
+            cb.from_user.id,
+            int(source_s),
+            int(target_s),
+        )
     except ExchangeError as exc:
         return await cb.answer(str(exc), show_alert=True)
     except Exception:
@@ -437,7 +452,7 @@ async def exchange_accept(cb: types.CallbackQuery):
             "Ваша новая запись:\n"
             f"{_slot_text(result.from_slot)}",
             parse_mode="HTML",
-            reply_markup=_main_kb(result.from_slot.tg_id),
+            reply_markup=await _main_kb_async(result.from_slot.tg_id),
         )
     except Exception:
         pass
@@ -449,7 +464,7 @@ async def exchange_decline(cb: types.CallbackQuery):
         proposal_id = int(cb.data.removeprefix("ex_decline_"))
     except Exception:
         return await cb.answer("Некорректное предложение.", show_alert=True)
-    details = proposal_details(proposal_id)
+    details = await asyncio.to_thread(proposal_details, proposal_id)
     if not details:
         return await cb.answer("Предложение уже недоступно.", show_alert=True)
     ok = await decline_proposal(cb.from_user.id, proposal_id)

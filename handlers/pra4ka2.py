@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
 from html import escape
 from zoneinfo import ZoneInfo
@@ -19,6 +20,9 @@ from database import (
     get_availability_bulk,
     get_notification_settings,
     set_notification_setting,
+    get_main_menu_state,
+    get_booking_entry_state,
+    get_user_wash_date_state,
 )
 from keyboards import build_main_menu, reply_menu
 from booking_service import create_booking_safe, DailyLimit, SlotBusy, InvalidBooking
@@ -87,11 +91,16 @@ def active_waitlist(tg_id: int) -> bool:
 
 
 def main_kb(tg_id: int):
-    from exchange_service import has_future_wash_for_tg
-    return build_main_menu(
-        active_waitlist(tg_id),
-        has_future_wash_for_tg(int(tg_id)),
+    waitlist_active, exchange_available = get_main_menu_state(int(tg_id))
+    return build_main_menu(waitlist_active, exchange_available)
+
+
+async def main_kb_async(tg_id: int):
+    waitlist_active, exchange_available = await asyncio.to_thread(
+        get_main_menu_state,
+        int(tg_id),
     )
+    return build_main_menu(waitlist_active, exchange_available)
 
 
 def date_text(date_iso: str) -> str:
@@ -170,7 +179,7 @@ def nav_rows(back: bool = True) -> list[list[str]]:
 
 async def show_home(msg: types.Message, state: FSMContext):
     await state.clear()
-    await msg.answer("🏠 Главное меню", reply_markup=main_kb(msg.from_user.id))
+    await msg.answer("🏠 Главное меню", reply_markup=await main_kb_async(msg.from_user.id))
 
 
 @router.message(Command("menu"))
@@ -182,12 +191,12 @@ async def home(msg: types.Message, state: FSMContext):
 @router.message(Command("book"))
 @router.message(F.text == "🧺 Записаться")
 async def start_booking(msg: types.Message, state: FSMContext):
-    if is_banned(msg.from_user.id):
-        return await msg.answer("🚫 Вы заблокированы и не можете записываться.", reply_markup=main_kb(msg.from_user.id))
-    user = get_user(msg.from_user.id)
+    user, banned = await asyncio.to_thread(get_booking_entry_state, msg.from_user.id)
+    if banned:
+        return await msg.answer("🚫 Вы заблокированы и не можете записываться.", reply_markup=await main_kb_async(msg.from_user.id))
     if not user or not user[2] or not user[3]:
         return await msg.answer("Сначала завершите регистрацию через /start.")
-    dates = booking_dates()
+    dates = await asyncio.to_thread(booking_dates)
     await state.clear()
     await state.set_state(BookFlow.date)
     await state.update_data(date_map={label: iso for label, iso in dates})
@@ -207,12 +216,19 @@ async def choose_date(msg: types.Message, state: FSMContext):
         return await msg.answer("Выберите дату кнопкой ниже.")
 
     now = datetime.now(TZ)
-    machines, availability = get_availability_bulk([date_iso])
+    availability_task = asyncio.to_thread(get_availability_bulk, [date_iso])
+    user_state_task = asyncio.to_thread(
+        get_user_wash_date_state,
+        msg.from_user.id,
+        date_iso,
+    )
+    (machines, availability), (user, wash_exists) = await asyncio.gather(
+        availability_task,
+        user_state_task,
+    )
 
     lines = [f"📅 <b>{date_text(date_iso)}</b>", ""]
     machine_map = {}
-    user = get_user(msg.from_user.id)
-    wash_exists = bool(user and has_wash_booking(int(user[0]), date_iso))
     for mid, mtype, name in machines:
         if str(mtype) == "dry" and not wash_exists:
             continue
@@ -231,7 +247,7 @@ async def choose_date(msg: types.Message, state: FSMContext):
         await state.clear()
         return await msg.answer(
             "На эту дату свободных записей нет.",
-            reply_markup=main_kb(msg.from_user.id),
+            reply_markup=await main_kb_async(msg.from_user.id),
         )
 
     await state.set_state(BookFlow.machine)
@@ -256,7 +272,7 @@ async def choose_machine(msg: types.Message, state: FSMContext):
     if not mid:
         return await msg.answer("Выберите машинку кнопкой ниже.")
     date_iso = data["date"]
-    hours = get_free_hours_effective(int(mid), date_iso)
+    hours = await asyncio.to_thread(get_free_hours_effective, int(mid), date_iso)
     now = datetime.now(TZ)
     if date_iso == now.date().isoformat():
         hours = [h for h in hours if h > now.hour]
@@ -299,13 +315,13 @@ async def choose_hour(msg: types.Message, state: FSMContext):
         await state.clear()
         return await msg.answer(
             "⚠️ У вас уже есть запись на этот тип машины в этот день.",
-            reply_markup=main_kb(msg.from_user.id),
+            reply_markup=await main_kb_async(msg.from_user.id),
         )
     except (SlotBusy, InvalidBooking):
         await state.clear()
         return await msg.answer(
             "Этот слот уже недоступен. Откройте запись ещё раз.",
-            reply_markup=main_kb(msg.from_user.id),
+            reply_markup=await main_kb_async(msg.from_user.id),
         )
 
     from handlers.laundry_features import schedule_reminder
@@ -317,7 +333,7 @@ async def choose_hour(msg: types.Message, state: FSMContext):
         f"🕐 {result.hour:02d}:00\n"
         f"{'🧺' if result.machine_type == 'wash' else '🌬️'} {result.machine_name}",
         parse_mode="HTML",
-        reply_markup=main_kb(msg.from_user.id),
+        reply_markup=await main_kb_async(msg.from_user.id),
     )
 
     if result.machine_type == "wash":
@@ -369,9 +385,9 @@ def future_bookings(tg_id: int):
 @router.message(F.text == "📋 Мои записи")
 async def my_bookings(msg: types.Message, state: FSMContext):
     await state.clear()
-    rows = future_bookings(msg.from_user.id)
+    rows = await asyncio.to_thread(future_bookings, msg.from_user.id)
     if not rows:
-        return await msg.answer("У вас нет предстоящих записей.", reply_markup=main_kb(msg.from_user.id))
+        return await msg.answer("У вас нет предстоящих записей.", reply_markup=await main_kb_async(msg.from_user.id))
     lines = ["📋 <b>Мои записи</b>", ""]
     for _, typ, name, date_iso, hour in rows:
         lines += [
@@ -391,7 +407,7 @@ async def my_bookings(msg: types.Message, state: FSMContext):
 async def cancel_start(msg: types.Message, state: FSMContext):
     rows = future_bookings(msg.from_user.id)
     if not rows:
-        return await msg.answer("У вас нет предстоящих записей.", reply_markup=main_kb(msg.from_user.id))
+        return await msg.answer("У вас нет предстоящих записей.", reply_markup=await main_kb_async(msg.from_user.id))
     labels = {}
     buttons = []
     for bid, typ, name, date_iso, hour in rows:
@@ -431,16 +447,16 @@ async def cancel_confirm(msg: types.Message, state: FSMContext):
         old = await cancel_booking_safe(int(data["cancel_id"]))
     except InvalidBooking as exc:
         await state.clear()
-        return await msg.answer(str(exc), reply_markup=main_kb(msg.from_user.id))
+        return await msg.answer(str(exc), reply_markup=await main_kb_async(msg.from_user.id))
     await state.clear()
     if getattr(old, "waitlist_reopened", False):
         await msg.answer(
             "✅ Запись отменена.\n\n"
             "Ваша заявка в листе ожидания снова активна, а накопленный приоритет сохранён.",
-            reply_markup=main_kb(msg.from_user.id),
+            reply_markup=await main_kb_async(msg.from_user.id),
         )
     else:
-        await msg.answer("✅ Запись отменена.", reply_markup=main_kb(msg.from_user.id))
+        await msg.answer("✅ Запись отменена.", reply_markup=await main_kb_async(msg.from_user.id))
     from waitlist_service import distribute_date
     await distribute_date(old.date, context="freed_slot")
 
@@ -719,10 +735,10 @@ async def waitlist_home(msg: types.Message, state: FSMContext):
     if not WAITLIST_ENABLED:
         return await msg.answer(
             "🔧 Лист ожидания временно недоступен. Обычная запись работает как обычно.",
-            reply_markup=main_kb(msg.from_user.id),
+            reply_markup=await main_kb_async(msg.from_user.id),
         )
     if is_banned(msg.from_user.id):
-        return await msg.answer("🚫 Вы заблокированы и не можете использовать лист ожидания.", reply_markup=main_kb(msg.from_user.id))
+        return await msg.answer("🚫 Вы заблокированы и не можете использовать лист ожидания.", reply_markup=await main_kb_async(msg.from_user.id))
     user = get_user(msg.from_user.id)
     if not user or not user[2] or not user[3]:
         return await msg.answer("Сначала завершите регистрацию через /start.")
@@ -772,7 +788,7 @@ async def waitlist_create(msg: types.Message, state: FSMContext):
     if not WAITLIST_ENABLED:
         return await msg.answer(
             "🔧 Лист ожидания временно недоступен.",
-            reply_markup=main_kb(msg.from_user.id),
+            reply_markup=await main_kb_async(msg.from_user.id),
         )
 
     is_edit = msg.text == "✏️ Изменить заявку"
@@ -1442,7 +1458,7 @@ async def waitlist_confirm(msg: types.Message, state: FSMContext):
         )
     except ValueError as exc:
         await state.clear()
-        return await msg.answer(str(exc), reply_markup=main_kb(msg.from_user.id))
+        return await msg.answer(str(exc), reply_markup=await main_kb_async(msg.from_user.id))
 
     is_edit = bool(data.get("is_edit"))
     state_text = _subscription_state_text(int(request_id))
@@ -1458,7 +1474,7 @@ async def waitlist_confirm(msg: types.Message, state: FSMContext):
             "\n\nЕсли у вас уже есть запись на стирку, подписка не копит приоритет параллельно с ней."
             "\nПосле состоявшейся стирки подписка включается снова автоматически."
         ),
-        reply_markup=main_kb(msg.from_user.id),
+        reply_markup=await main_kb_async(msg.from_user.id),
     )
     await check_active_waitlist()
 
@@ -1494,7 +1510,7 @@ async def waitlist_cancel_confirm(msg: types.Message, state: FSMContext):
     await state.clear()
     await msg.answer(
         "✅ Подписка отключена." if ok else "Активной подписки уже нет.",
-        reply_markup=main_kb(msg.from_user.id),
+        reply_markup=await main_kb_async(msg.from_user.id),
     )
 
 
@@ -1656,7 +1672,7 @@ async def waitlist_accept_callback(callback: types.CallbackQuery, state: FSMCont
         f"🕐 {result.hour:02d}:00\n"
         f"🧺 {result.machine_name}",
         parse_mode="HTML",
-        reply_markup=main_kb(callback.from_user.id),
+        reply_markup=await main_kb_async(callback.from_user.id),
     )
     if result.machine_type == "wash":
         offer = find_next_dryer(result.user_id, result.date, result.hour)
