@@ -377,7 +377,7 @@ def future_bookings(tg_id: int):
 @router.message(F.text == "📋 Мои записи")
 async def my_bookings(msg: types.Message, state: FSMContext):
     await state.clear()
-    rows = future_bookings(msg.from_user.id)
+    rows = await asyncio.to_thread(future_bookings, msg.from_user.id)
     if not rows:
         return await msg.answer("У вас нет предстоящих записей.", reply_markup=main_kb(msg.from_user.id))
     lines = ["📋 <b>Мои записи</b>", ""]
