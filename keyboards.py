@@ -16,14 +16,22 @@ def reply_menu(rows: list[list[str]], *, placeholder: str | None = None) -> Repl
 start_menu = reply_menu([["🧺 Начать запись"]])
 
 
-def build_main_menu(waitlist_active: bool = False) -> ReplyKeyboardMarkup:
+def build_main_menu(
+    waitlist_active: bool = False,
+    exchange_available: bool = False,
+) -> ReplyKeyboardMarkup:
     waitlist_text = "🔔 Лист ожидания • активен" if waitlist_active else "🔔 Лист ожидания"
-    return reply_menu([
+    rows = [
         [waitlist_text],
         ["📋 Мои записи"],
+    ]
+    if exchange_available:
+        rows.append(["🔄 Обмен стирками"])
+    rows += [
         ["🧺 Записаться"],
         ["ℹ️ Помощь"],
-    ])
+    ]
+    return reply_menu(rows)
 
 
 main_menu = build_main_menu(False)

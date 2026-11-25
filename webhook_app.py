@@ -52,6 +52,8 @@ dp = Dispatcher()
 from handlers.registration import router as registration_router  # noqa: E402
 from handlers.pra4ka2 import router as pra4ka2_router  # noqa: E402
 from waitlist_service import attach_bot as attach_waitlist_bot, process_night_round, rebuild_waitlist_jobs  # noqa: E402
+from exchange_service import attach_bot as attach_exchange_bot, rebuild_exchange_jobs  # noqa: E402
+from handlers.exchange import router as exchange_router  # noqa: E402
 from handlers.booking import router as booking_router  # noqa: E402
 from handlers.admin_access import router as admin_access_router, sync_dynamic_admins  # noqa: E402
 from handlers.admin_extra import router as admin_extra_router  # noqa: E402
@@ -68,6 +70,7 @@ from handlers.laundry_features import (  # noqa: E402
 dp.include_routers(
     registration_router,
     pra4ka2_router,
+    exchange_router,
     laundry_features_router,
     booking_router,
     admin_access_router,
@@ -114,6 +117,7 @@ async def background_init(app: web.Application):
         attach_bot(bot)
         attach_feature_bot(bot)
         attach_waitlist_bot(bot)
+        attach_exchange_bot(bot)
 
         try:
             await setup_bot_commands(bot)
@@ -126,6 +130,7 @@ async def background_init(app: web.Application):
         global REMINDERS_TASK, WH_RETRY_TASK
         REMINDERS_TASK = asyncio.create_task(rebuild_feature_jobs())
         asyncio.create_task(rebuild_waitlist_jobs())
+        asyncio.create_task(rebuild_exchange_jobs())
         if datetime.now(ZoneInfo("Europe/Moscow")).hour == 23:
             asyncio.create_task(process_night_round())
 

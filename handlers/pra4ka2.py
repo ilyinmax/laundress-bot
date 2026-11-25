@@ -87,7 +87,11 @@ def active_waitlist(tg_id: int) -> bool:
 
 
 def main_kb(tg_id: int):
-    return build_main_menu(active_waitlist(tg_id))
+    from exchange_service import has_future_wash_for_tg
+    return build_main_menu(
+        active_waitlist(tg_id),
+        has_future_wash_for_tg(int(tg_id)),
+    )
 
 
 def date_text(date_iso: str) -> str:
